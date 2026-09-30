@@ -44,6 +44,8 @@ https://www.kaggle.com/code/seoriun/notebookf32ae7a716/edit
 | `GET /health` | 상태 |
 
 ## Browser agent
+Safari/long `/browse`: frontend AbortController (~150s), Korean timeout vs network errors, one network retry; Worker JSON errors + ~100s wall budget + default `max_steps` 8.
+
 Browse LLM: **Claude** → **Gemini** → Groq.
 `/chat` primary: **Claude** → Gemini → Groq → template.
 

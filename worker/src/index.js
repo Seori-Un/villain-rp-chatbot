@@ -23,6 +23,16 @@ const MAX_SESSIONS = 300;
 
 export default {
   async fetch(request, env) {
+    try {
+      return await handleRequest(request, env);
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e).slice(0, 240);
+      return json({ ok: false, error: "uncaught", reply: "서버 오류: " + msg }, 500);
+    }
+  },
+};
+
+async function handleRequest(request, env) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS });
@@ -31,7 +41,7 @@ export default {
       return json({
         ok: true,
         bot: "채티",
-        version: "secretary-v1",
+        version: "secretary-v1.1-browse-timeout",
         chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
@@ -45,11 +55,37 @@ export default {
       });
     }
     if (url.pathname === "/agent" && request.method === "POST") {
-      return handleAgent(request, env);
+      try {
+        return await handleAgent(request, env);
+      } catch (e) {
+        const msg = String(e && e.message ? e.message : e).slice(0, 240);
+        return json(
+          {
+            ok: false,
+            error: "agent_handler_failed",
+            reply: "처리 중 서버 오류가 났어. " + msg,
+            agent: true,
+          },
+          500
+        );
+      }
     }
     if (url.pathname === "/browse" && request.method === "POST") {
-      const out = await handleBrowse(request, env);
-      return json(out.body, out.status);
+      try {
+        const out = await handleBrowse(request, env);
+        return json(out.body, out.status);
+      } catch (e) {
+        const msg = String(e && e.message ? e.message : e).slice(0, 240);
+        return json(
+          {
+            ok: false,
+            error: "browse_handler_failed",
+            reply: "브라우저 처리 중 서버 오류가 났어. " + msg,
+            steps: [],
+          },
+          500
+        );
+      }
     }
     if (url.pathname === "/chat" && request.method === "POST") {
       return handleChat(request, env);
@@ -61,8 +97,7 @@ export default {
       return handleReset(request);
     }
     return json({ error: "not_found", try: ["/health", "POST /agent", "POST /chat", "POST /browse"] }, 404);
-  },
-};
+}
 
 /** Primary planned LLM for /chat (key presence only; runtime may fall back). */
 function resolveChatLlm(env) {
@@ -101,7 +136,7 @@ async function handleAgent(request, env) {
         goal,
         message: goal,
         session_id: body.session_id || body.sessionId,
-        max_steps: body.max_steps ?? body.maxSteps ?? 12,
+        max_steps: body.max_steps ?? body.maxSteps ?? 8,
         confirm: body.confirm,
       }),
     });

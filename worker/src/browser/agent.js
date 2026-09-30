@@ -17,7 +17,7 @@ import { planBrowseStep, resolveBrowseLlm } from "./llm.js";
  * @param {number} [opts.max_steps]
  * @param {object} [opts.confirm]
  */
-export async function runBrowserAgent({ goal, env, session_id, max_steps = 12, confirm = {} }) {
+export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, confirm = {} }) {
   const goalCheck = checkGoal(goal);
   if (!goalCheck.ok) {
     return {
@@ -49,8 +49,11 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 12, c
     };
   }
 
-  const maxSteps = Math.max(1, Math.min(20, Number(max_steps) || 12));
+  const maxSteps = Math.max(1, Math.min(12, Number(max_steps) || 8));
   const sid = session_id || crypto.randomUUID();
+  /** Return JSON before Safari/client typically drops long connections (~150s). */
+  const WALL_BUDGET_MS = 100000;
+  const wallStarted = Date.now();
   /** @type {object[]} timeline steps for UI */
   const steps = [];
   let page = { url: "", title: "" };
@@ -83,7 +86,53 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 12, c
   });
 
   for (let n = 1; n <= maxSteps; n++) {
-    const planned = await planBrowseStep({ env, messages, preferTools: mode !== "react_only" });
+    if (Date.now() - wallStarted > WALL_BUDGET_MS) {
+      pushStep(steps, {
+        type: "think",
+        content: "시간이 길어져서 여기까지 정리하고 응답할게. 이어서 시키면 이어서 할게.",
+      });
+      const partial = buildPartialSummary(steps, maxSteps, page);
+      return finish({
+        ok: true,
+        reply:
+          "시간이 길어져서 중간에 끊었어. " +
+          partial +
+          " 같은 목표로 다시 시키면 이어서 할게.",
+        steps,
+        needsConfirm: null,
+        mode,
+        sid,
+        maxSteps,
+        n: Math.max(1, n - 1),
+        error: "wall_budget",
+        lastScreenshot,
+        providerUsed,
+        modelUsed,
+        llmInfo,
+      });
+    }
+    let planned;
+    try {
+      planned = await planBrowseStep({ env, messages, preferTools: mode !== "react_only" });
+    } catch (planErr) {
+      const msg = String(planErr && planErr.message ? planErr.message : planErr).slice(0, 200);
+      pushStep(steps, { type: "think", content: `LLM 호출 오류: ${msg}` });
+      return finish({
+        ok: false,
+        reply: `LLM 호출 중 오류 — ${msg}`,
+        steps,
+        needsConfirm: null,
+        mode,
+        sid,
+        maxSteps,
+        n,
+        error: "llm_uncaught",
+        lastScreenshot,
+        providerUsed,
+        modelUsed,
+        llmInfo,
+      });
+    }
     if (planned.provider) providerUsed = planned.provider;
     if (planned.model) modelUsed = planned.model;
     if (planned.mode) mode = planned.mode;

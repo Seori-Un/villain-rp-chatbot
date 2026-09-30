@@ -18,7 +18,7 @@ export async function handleBrowse(request, env) {
 
   const goal = (body.goal || body.message || body.text || "").toString();
   const session_id = (body.session_id || body.sessionId || "").toString() || undefined;
-  const max_steps = body.max_steps ?? body.maxSteps ?? 12;
+  const max_steps = body.max_steps ?? body.maxSteps ?? 8;
   const confirm = body.confirm && typeof body.confirm === "object" ? body.confirm : {};
 
   if (!isBrowserConfigured(env)) {
@@ -51,15 +51,41 @@ export async function handleBrowse(request, env) {
     };
   }
 
-  const result = await runBrowserAgent({
-    goal,
-    env,
-    session_id,
-    max_steps,
-    confirm,
-  });
+  let result;
+  try {
+    result = await runBrowserAgent({
+      goal,
+      env,
+      session_id,
+      max_steps,
+      confirm,
+    });
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e).slice(0, 240);
+    // Always JSON — never drop the connection / blank response (Safari "Load failed")
+    return {
+      status: 500,
+      body: {
+        ok: false,
+        error: "browse_uncaught",
+        reply: "브라우저 처리 중 오류가 났어. " + msg,
+        steps: [],
+        thinking: [],
+        needs_confirm: null,
+        browser: "configured",
+      },
+    };
+  }
 
-  const status = result.ok ? 200 : result.error === "denied_illegal" ? 403 : result.needs_confirm ? 200 : 422;
+  const status = result.ok
+    ? 200
+    : result.error === "denied_illegal"
+      ? 403
+      : result.needs_confirm
+        ? 200
+        : result.error === "wall_budget"
+          ? 200
+          : 422;
   return { status, body: result };
 }
 

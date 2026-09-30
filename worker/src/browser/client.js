@@ -32,7 +32,8 @@ export async function browserAct(env, payload) {
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 45000);
+  // trycloudflare / ngrok tunnels can be slow; still return JSON on failure
+  const timer = setTimeout(() => controller.abort(), 55000);
   try {
     const res = await fetch(base + "/act", {
       method: "POST",
@@ -40,22 +41,39 @@ export async function browserAct(env, payload) {
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    const data = await res.json().catch(() => ({}));
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = { error: "browser_non_json", message: "러너가 JSON이 아닌 응답을 보냈어" };
+    }
     if (!res.ok) {
       return {
         ok: false,
         error: "browser_http_" + res.status,
-        message: data.message || data.error || JSON.stringify(data).slice(0, 200),
+        message:
+          data.message ||
+          data.error ||
+          (typeof data === "object" ? JSON.stringify(data).slice(0, 200) : String(data).slice(0, 200)),
         data,
       };
     }
     return { ok: true, ...data };
   } catch (e) {
     const msg = String(e && e.message ? e.message : e);
+    const aborted = /abort/i.test(msg);
+    const tunnel =
+      /Load failed|Failed to fetch|network|ECONNRESET|tunnel|cloudflare|ngrok|ENOTFOUND|ECONNREFUSED/i.test(
+        msg
+      );
     return {
       ok: false,
-      error: /abort/i.test(msg) ? "browser_timeout" : "browser_fetch_failed",
-      message: msg.slice(0, 240),
+      error: aborted ? "browser_timeout" : tunnel ? "browser_tunnel_failed" : "browser_fetch_failed",
+      message: aborted
+        ? "브라우저 러너 응답 시간 초과 (터널이 느릴 수 있어)"
+        : tunnel
+          ? "브라우저 러너(터널) 연결 실패 — trycloudflare/ngrok이 끊겼을 수 있어: " + msg.slice(0, 160)
+          : msg.slice(0, 240),
     };
   } finally {
     clearTimeout(timer);

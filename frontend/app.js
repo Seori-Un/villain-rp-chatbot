@@ -35,6 +35,12 @@ let browseApprovedHosts = [];
 /** @type {null | { goal: string, session_id?: string, needs_confirm: object }} */
 let pendingBrowseConfirm = null;
 
+/** Safari/long /browse: AbortSignal + Korean errors (avoid raw "Load failed") */
+const BROWSE_TIMEOUT_MS = 150000; // 150s — generous but before silent drop
+const CHAT_TIMEOUT_MS = 90000;
+const BROWSE_MAX_STEPS = 8; // shorter Worker wall time by default
+const BROWSE_PROGRESS_MS = 2500;
+
 const TOOL_KO = {
   open: "열기",
   click: "클릭",
@@ -43,6 +49,58 @@ const TOOL_KO = {
   screenshot: "캡처",
   done: "끝",
 };
+
+/* ---------- fetch with timeout (Safari-safe) ---------- */
+
+function classifyFetchError(err) {
+  const msg = String(err && err.message != null ? err.message : err || "");
+  const name = String(err && err.name ? err.name : "");
+  if (name === "AbortError" || /aborted|AbortError|The operation was aborted/i.test(msg)) {
+    return {
+      kind: "timeout",
+      text: "요청이 너무 오래 걸려서 타임아웃됐어 (약 2~3분). 목표를 짧게 나누거나 다시 시도해 줘.",
+    };
+  }
+  // Safari: TypeError "Load failed"; Chrome: "Failed to fetch"
+  if (
+    name === "TypeError" ||
+    /Load failed|Failed to fetch|NetworkError|network error|fetch failed|ECONNRESET|ERR_NETWORK/i.test(msg)
+  ) {
+    return {
+      kind: "network",
+      text: "네트워크 연결이 끊겼어. 터널·회선이 불안정할 수 있어 — 다시 시도해 볼게.",
+    };
+  }
+  return {
+    kind: "other",
+    text: "웹 연결이 안 되네. " + (msg.slice(0, 120) || "알 수 없는 오류"),
+  };
+}
+
+/**
+ * fetch + JSON parse with AbortController timeout.
+ * @returns {Promise<{ res: Response, data: object }>}
+ */
+async function fetchJson(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
+    return { res, data };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 /* ---------- task detection (keep in sync with worker/src/task.js) ---------- */
 
@@ -406,23 +464,26 @@ async function runChatTurn(message) {
   btn.disabled = true;
   const pending = addBubble("…", "bot");
   try {
-    const res = await fetch(`${API_BASE}/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message,
-        history: messages
-          .filter((m) => m.kind !== "browse" || m.role === "user")
-          .map((m) => ({
-            role: m.role === "assistant" || m.role === "bot" ? "assistant" : "user",
-            content: m.content,
-          }))
-          .slice(-24),
-        session_id: sessionId || undefined,
-        snapshot: snapshot || undefined,
-      }),
-    });
-    const data = await res.json().catch(() => ({}));
+    const { res, data } = await fetchJson(
+      `${API_BASE}/chat`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          history: messages
+            .filter((m) => m.kind !== "browse" || m.role === "user")
+            .map((m) => ({
+              role: m.role === "assistant" || m.role === "bot" ? "assistant" : "user",
+              content: m.content,
+            }))
+            .slice(-24),
+          session_id: sessionId || undefined,
+          snapshot: snapshot || undefined,
+        }),
+      },
+      CHAT_TIMEOUT_MS
+    );
     if (data.session_id) sessionId = data.session_id;
     if (data.snapshot) snapshot = data.snapshot;
     const reply = data.reply || data.error || "응답이 비었네.";
@@ -440,7 +501,12 @@ async function runChatTurn(message) {
     }
     persist();
   } catch (err) {
-    pending.textContent = "연결이 안 되네. " + String(err.message || err);
+    const c = classifyFetchError(err);
+    pending.textContent = c.kind === "timeout"
+      ? "채팅 응답이 너무 늦어서 타임아웃됐어. 다시 보내 줘."
+      : c.kind === "network"
+        ? "네트워크 연결이 안 되네. 잠시 후 다시 시도해 줘."
+        : c.text;
     pending.classList.add("err");
   } finally {
     btn.disabled = false;
@@ -494,18 +560,49 @@ async function runBrowseTurn(goal, opts = {}) {
       : undefined;
 
   const t0 = performance.now();
+  pendingText.textContent = "웹에서 처리 중… (최대 약 2~3분 걸릴 수 있어)";
+  const progressTimer = setInterval(() => {
+    const sec = Math.round((performance.now() - t0) / 1000);
+    pendingText.textContent = `웹에서 처리 중… ${sec}초 경과 (최대 약 2~3분)`;
+  }, BROWSE_PROGRESS_MS);
+
+  const browseBody = {
+    goal,
+    session_id: browseSessionId || sessionId || undefined,
+    max_steps: BROWSE_MAX_STEPS,
+    confirm: confirmPayload,
+  };
+
+  async function doBrowseFetch(isRetry) {
+    if (isRetry) {
+      pendingText.textContent = "네트워크 오류 — 한 번 더 시도 중…";
+    }
+    return fetchJson(
+      `${API_BASE}/browse`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(browseBody),
+      },
+      BROWSE_TIMEOUT_MS
+    );
+  }
+
   try {
-    const res = await fetch(`${API_BASE}/browse`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        goal,
-        session_id: browseSessionId || sessionId || undefined,
-        max_steps: 12,
-        confirm: confirmPayload,
-      }),
-    });
-    const data = await res.json().catch(() => ({}));
+    let res;
+    let data;
+    try {
+      ({ res, data } = await doBrowseFetch(false));
+    } catch (err) {
+      const c = classifyFetchError(err);
+      // Retry once on network fail (Safari Load failed / tunnel flake)
+      if (c.kind === "network") {
+        await sleep(900);
+        ({ res, data } = await doBrowseFetch(true));
+      } else {
+        throw err;
+      }
+    }
     const ms = Math.round(performance.now() - t0);
     if (data.session_id) browseSessionId = data.session_id;
 
@@ -553,12 +650,15 @@ async function runBrowseTurn(goal, opts = {}) {
     persist();
   } catch (err) {
     pendingWrap.remove();
-    const msg = "웹 연결이 안 되네. " + String(err.message || err);
+    const c = classifyFetchError(err);
+    // Keep user message; show Korean timeout vs network (never raw "Load failed")
+    const msg = c.text;
     addBrowseReply(msg, [], {}, true);
     messages.push({ role: "assistant", content: msg, kind: "browse" });
     hideBrowseConfirm();
     persist();
   } finally {
+    clearInterval(progressTimer);
     btn.disabled = false;
     if (browseConfirm) browseConfirm.disabled = false;
     input.focus();
