@@ -12,43 +12,27 @@
       <div class="mark">채</div>
       <div class="header-text">
         <h1>채티</h1>
-        <p class="sub">집착 동역학 롤플레이 · 상태는 말투로만</p>
+        <p class="sub" id="headerSub">개인 비서 · 일 시키면 알아서 처리</p>
       </div>
-      <button type="button" id="browseToggle" class="mode-btn" aria-pressed="false" title="웹 브라우징 부탁하기">
-        웹 시켜줘
-      </button>
+      <div class="mode-soft" role="group" aria-label="모드">
+        <button type="button" id="modeSecretary" class="soft-btn" aria-pressed="true" title="비서 (기본)">비서</button>
+        <button type="button" id="modeRp" class="soft-btn" aria-pressed="false" title="롤플레이">채티(RP)</button>
+      </div>
     </header>
-
-    <div id="browsePanel" class="browse-panel" hidden>
-      <div class="browse-head">
-        <strong>웹 심부름</strong>
-        <span class="browse-hint">대신 열어보고 클릭·타이핑까지 — RP랑 따로야 · 생각 과정 표시</span>
-      </div>
-      <label class="browse-label" for="browseGoal">목표</label>
-      <textarea id="browseGoal" rows="2" placeholder="예: example.com 열어서 제목 알려줘"></textarea>
-      <div class="browse-actions">
-        <button type="button" id="browseRun">시켜보기</button>
-        <button type="button" id="browseConfirm" class="browse-confirm" hidden>로그인 허용하고 계속</button>
-        <span id="browseStatus" class="browse-status idle" aria-live="polite">대기</span>
-      </div>
-      <p id="browseConfirmHint" class="browse-confirm-hint" hidden></p>
-      <details id="browseThinking" class="browse-thinking" open>
-        <summary>생각 중 <span id="browseThinkMeta" class="think-meta"></span></summary>
-        <ol id="browseSteps" class="browse-steps" aria-label="생각·도구 타임라인"></ol>
-      </details>
-      <figure id="browseShotWrap" class="browse-shot" hidden>
-        <figcaption>마지막 화면</figcaption>
-        <img id="browseShot" alt="browse screenshot" />
-      </figure>
-    </div>
 
     <div id="state" class="state"></div>
     <main id="log" aria-live="polite"></main>
+
+    <div id="loginConfirmBar" class="login-confirm-bar" hidden>
+      <p id="loginConfirmHint" class="browse-confirm-hint"></p>
+      <button type="button" id="browseConfirm" class="browse-confirm">로그인 허용하고 계속</button>
+    </div>
+
     <form id="form">
-      <input id="input" autocomplete="off" placeholder="말해 봐. /state /reset /silence" />
+      <input id="input" autocomplete="off" placeholder="말해 봐. 검색·열어·확인해… 자연스럽게 시키면 돼" />
       <button type="submit">보내기</button>
     </form>
-    <p class="hint">API: <code id="apiLabel"></code></p>
+    <p class="hint">API: <code id="apiLabel"></code> · 대화는 이 기기에 저장 · <button type="button" id="clearPersist" class="linkish">기록 지우기</button></p>
   </div>
   <script src="app.js"></script>
 </body>

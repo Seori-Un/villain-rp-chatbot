@@ -8,11 +8,12 @@
 
 | 구성요소 | 역할 | 경로 |
 |---------|------|------|
+| Worker `/agent` | 비서 통합 라우팅 (task → browse, else chat) | `worker/src/index.js` + `task.js` |
 | Worker `/browse` | 브라우즈 LLM 루프 + 안전 게이트 + thinking steps | `worker/src/browser/` |
 | Browse LLM | **Claude**(키 있으면) → **Gemini** → Groq 폴백 | `worker/src/browser/llm.js` |
 | RP `/chat` | **Claude** → Gemini → Groq → template | `worker/src/index.js` |
 | browser-runner | 로컬/VPS Playwright HTTP 서버 | `browser-runner/` |
-| 프론트 「웹 시켜줘」 | 접이식 「생각 중」 타임라인 | `frontend/` |
+| 프론트 비서 UI | 단일 채팅 입력 → 자동 browse/chat · 인라인 「생각 중」 | `frontend/` |
 
 ```
 사용자 → POST /browse { goal, confirm?: {...} }
@@ -122,3 +123,19 @@ npx wrangler secret put ANTHROPIC_API_KEY
 | Claude `/chat` RP | ✅ 1순위 (Gemini→Groq 폴백) |
 | browser-runner | ✅ |
 | 채티 「생각 중」 타임라인 | ✅ |
+
+
+## Persist / 세션 한계 (비서 v1)
+
+프론트는 **localStorage 키 `chaeti_v3`** 에 다음을 저장·복원합니다.
+
+| 저장 | 내용 |
+|------|------|
+| ✅ | 채팅 메시지(최대 ~60턴), browse step **요약**(스크린샷·비밀번호 제외), `session_id`, RP `snapshot`, UI 모드 |
+| ❌ | 비밀번호, 쿠키, Playwright 탭/로그인 세션, 스크린샷 blob |
+
+**브라우저 메모리(쿠키·열린 탭·로그인)는 Worker/browser-runner 프로세스 안에만** 있습니다.
+Worker 인스턴스가 교체되거나 runner가 재시작되면 웹 로그인 상태는 사라집니다. 대화 텍스트만 기기에 남습니다.
+
+강제 browse 접두사: `/웹`, `/web`, `/browse`.
+RP 모드에서는 휴리스틱 browse를 끄고, 접두사일 때만 browse합니다.

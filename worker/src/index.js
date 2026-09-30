@@ -1,12 +1,15 @@
 /**
- * 채티 v2.5 — 집착 동역학 롤플레이 + optional browser agent (/browse)
- * /chat LLM: Claude (ANTHROPIC_API_KEY) → Gemini → Groq → template
- * /browse unchanged: Claude → Gemini → Groq (see browser/llm.js)
+ * 채티 v3 — 비서(기본) + 집착 RP + browser agent
+ * POST /agent — unified: task-like → /browse, else /chat (invisible routing)
+ * POST /chat  — RP only (unchanged)
+ * POST /browse — browser agent (unchanged)
+ * LLM: Claude → Gemini → Groq → template
  * Optional: BROWSER_API_URL, BROWSER_API_KEY (see docs/browser-agent.md)
  */
 
 import { classifyIntent, normalizeUtterance } from "./intent.js";
 import { handleBrowse, browserHealth } from "./browser/index.js";
+import { routeAgentMode, stripWebPrefix } from "./task.js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -28,7 +31,7 @@ export default {
       return json({
         ok: true,
         bot: "채티",
-        version: "obsession-v2.5-chat-claude",
+        version: "secretary-v1",
         chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
@@ -37,8 +40,12 @@ export default {
             (env.CLAUDE_API_KEY && String(env.CLAUDE_API_KEY).trim())
         ),
         sessions: SESSIONS.size,
+        agent: true,
         ...browserHealth(env),
       });
+    }
+    if (url.pathname === "/agent" && request.method === "POST") {
+      return handleAgent(request, env);
     }
     if (url.pathname === "/browse" && request.method === "POST") {
       const out = await handleBrowse(request, env);
@@ -53,7 +60,7 @@ export default {
     if (url.pathname === "/reset" && request.method === "POST") {
       return handleReset(request);
     }
-    return json({ error: "not_found", try: ["/health", "POST /chat", "POST /browse"] }, 404);
+    return json({ error: "not_found", try: ["/health", "POST /agent", "POST /chat", "POST /browse"] }, 404);
   },
 };
 
@@ -68,6 +75,61 @@ function resolveChatLlm(env) {
   if (env.GEMINI_API_KEY && String(env.GEMINI_API_KEY).trim()) return "gemini";
   if (env.GROQ_API_KEY && String(env.GROQ_API_KEY).trim()) return "groq";
   return "template";
+}
+
+
+/**
+ * Unified secretary entry: route task-like messages to browse, else RP chat.
+ * Frontend may also route client-side; this endpoint is for one-box UX.
+ */
+async function handleAgent(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "invalid_json" }, 400);
+  }
+
+  const route = routeAgentMode(body);
+  if (route === "browse") {
+    const goal = stripWebPrefix(body.goal || body.message || body.text || "");
+    // Re-wrap so handleBrowse can read the body (Request body already consumed)
+    const browseReq = new Request(request.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        goal,
+        message: goal,
+        session_id: body.session_id || body.sessionId,
+        max_steps: body.max_steps ?? body.maxSteps ?? 12,
+        confirm: body.confirm,
+      }),
+    });
+    const out = await handleBrowse(browseReq, env);
+    return json(
+      {
+        ...out.body,
+        routed: "browse",
+        agent: true,
+      },
+      out.status
+    );
+  }
+
+  // chat path — reuse handleChat with a fresh Request carrying original body
+  const chatReq = new Request(request.url.replace(/\/agent$/, "/chat"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const chatRes = await handleChat(chatReq, env);
+  // annotate routed
+  try {
+    const data = await chatRes.json();
+    return json({ ...data, routed: "chat", agent: true }, chatRes.status);
+  } catch {
+    return chatRes;
+  }
 }
 
 async function handleChat(request, env) {

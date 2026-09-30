@@ -2,52 +2,186 @@ const DEFAULT_API = "https://villain-rp-chatbot.e5eeeee.workers.dev";
 const params = new URLSearchParams(location.search);
 const API_BASE = (params.get("api") || DEFAULT_API).replace(/\/$/, "");
 
+const STORAGE_KEY = "chaeti_v3";
+const LEGACY_KEYS = ["chaeti_session", "chaeti_snapshot", "chaeti_history"];
+
 const log = document.getElementById("log");
 const form = document.getElementById("form");
 const input = document.getElementById("input");
 const apiLabel = document.getElementById("apiLabel");
 const stateEl = document.getElementById("state");
+const headerSub = document.getElementById("headerSub");
+const modeSecretaryBtn = document.getElementById("modeSecretary");
+const modeRpBtn = document.getElementById("modeRp");
+const clearPersistBtn = document.getElementById("clearPersist");
+const loginConfirmBar = document.getElementById("loginConfirmBar");
+const browseConfirm = document.getElementById("browseConfirm");
+const loginConfirmHint = document.getElementById("loginConfirmHint");
+
 apiLabel.textContent = API_BASE;
 
-const browseToggle = document.getElementById("browseToggle");
-const browsePanel = document.getElementById("browsePanel");
-const browseGoal = document.getElementById("browseGoal");
-const browseRun = document.getElementById("browseRun");
-const browseStatus = document.getElementById("browseStatus");
-const browseSteps = document.getElementById("browseSteps");
-const browseThinking = document.getElementById("browseThinking");
-const browseThinkMeta = document.getElementById("browseThinkMeta");
-const browseShotWrap = document.getElementById("browseShotWrap");
-const browseShot = document.getElementById("browseShot");
-const browseConfirm = document.getElementById("browseConfirm");
-const browseConfirmHint = document.getElementById("browseConfirmHint");
-
-let sessionId = localStorage.getItem("chaeti_session") || "";
-let snapshot = null;
-try {
-  snapshot = JSON.parse(localStorage.getItem("chaeti_snapshot") || "null");
-} catch {
-  snapshot = null;
-}
-const history = [];
-try {
-  const saved = JSON.parse(localStorage.getItem("chaeti_history") || "[]");
-  if (Array.isArray(saved)) {
-    for (const turn of saved.slice(-30)) {
-      if (turn?.role && turn?.content) {
-        history.push(turn);
-        addBubble(turn.content, turn.role === "user" ? "user" : "bot", false);
-      }
-    }
-  }
-} catch {}
-
-/* Browse confirm / approved hosts — memory only; never localStorage (no secrets). */
+/** @type {"secretary"|"rp"} */
+let uiMode = "secretary";
+let sessionId = "";
 let browseSessionId = "";
-/** @type {string[]} */
+let snapshot = null;
+/** @type {Array<{role:string, content:string, kind?:string, steps?:any[], meta?:object}>} */
+let messages = [];
+/** @type {any[]} */
+let lastBrowseSteps = [];
+
+/** @type {string[]} memory-only; never localStorage */
 let browseApprovedHosts = [];
 /** @type {null | { goal: string, session_id?: string, needs_confirm: object }} */
 let pendingBrowseConfirm = null;
+
+const TOOL_KO = {
+  open: "열기",
+  click: "클릭",
+  type: "입력",
+  scroll: "스크롤",
+  screenshot: "캡처",
+  done: "끝",
+};
+
+/* ---------- task detection (keep in sync with worker/src/task.js) ---------- */
+
+function stripWebPrefix(text) {
+  return String(text || "")
+    .replace(/^\s*\/웹\s*/i, "")
+    .replace(/^\s*\/web\s*/i, "")
+    .replace(/^\s*\/browse\s*/i, "")
+    .trim();
+}
+
+function looksLikeBrowseTask(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return false;
+  if (/^\s*\/(?:웹|web|browse)(?=\s|$)/i.test(raw)) return true;
+  if (/^\s*\//.test(raw)) return false;
+  const t = raw.normalize("NFC");
+  if (/(웹\s*(으로|에서|검색|열어|확인)|브라우저|검색해|구글|네이버|사이트\s*열)/.test(t)) {
+    return true;
+  }
+  if (
+    /(검색|열어|열어줘|열어봐|로그인|배포|찾아|찾아줘|확인해|확인하|확인\s*해|클릭|스크롤|캡처|스크린샷|접속|들어가|들어가서|들어가줘|다운로드|업로드|설치|설정|가입|회원가입|티켓|예약|가격|시세|뉴스|날씨|지도|링크|URL|url|http)/.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (/\b[\w-]+\.(com|net|org|io|dev|kr|co\.kr|ai|app)\b/i.test(t)) return true;
+  if (/https?:\/\//i.test(t)) return true;
+  return false;
+}
+
+function shouldBrowse(message) {
+  if (uiMode === "rp") {
+    // RP mode: only explicit /웹|/web|/browse forces browse
+    return /^\s*\/(?:웹|web|browse)(?=\s|$)/i.test(message);
+  }
+  return looksLikeBrowseTask(message);
+}
+
+/* ---------- persistence ---------- */
+
+function loadStore() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (data && typeof data === "object") return data;
+    }
+  } catch {}
+  // migrate legacy keys
+  const legacy = { session_id: "", snapshot: null, messages: [], mode: "secretary", last_browse_steps: [] };
+  try {
+    legacy.session_id = localStorage.getItem("chaeti_session") || "";
+    legacy.snapshot = JSON.parse(localStorage.getItem("chaeti_snapshot") || "null");
+    const hist = JSON.parse(localStorage.getItem("chaeti_history") || "[]");
+    if (Array.isArray(hist)) {
+      legacy.messages = hist
+        .filter((t) => t?.role && t?.content)
+        .slice(-40)
+        .map((t) => ({ role: t.role, content: t.content, kind: "chat" }));
+    }
+  } catch {}
+  return legacy;
+}
+
+function persist() {
+  const payload = {
+    session_id: sessionId || "",
+    browse_session_id: browseSessionId || "",
+    snapshot: snapshot || null,
+    mode: uiMode,
+    messages: messages.slice(-60),
+    last_browse_steps: summarizeSteps(lastBrowseSteps).slice(-40),
+    updated_at: Date.now(),
+  };
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    // keep legacy mirrors for older tabs
+    if (sessionId) localStorage.setItem("chaeti_session", sessionId);
+    if (snapshot) localStorage.setItem("chaeti_snapshot", JSON.stringify(snapshot));
+    const hist = messages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }))
+      .slice(-40);
+    localStorage.setItem("chaeti_history", JSON.stringify(hist));
+  } catch (e) {
+    console.warn("persist failed", e);
+  }
+}
+
+/** Strip heavy fields (screenshots) before storing steps */
+function summarizeSteps(steps) {
+  if (!Array.isArray(steps)) return [];
+  return steps.map((s) => {
+    const out = {
+      type: s.type || inferType(s),
+      content: (s.content || "").toString().slice(0, 400),
+      tool: s.tool || s.action,
+      ok: s.ok,
+      n: s.n,
+    };
+    if (s.args && typeof s.args === "object") {
+      out.args = { ...s.args };
+      if (out.args.text) out.args.text = "***";
+    }
+    if (s.observation && typeof s.observation === "object") {
+      out.observation = {
+        title: s.observation.title,
+        url: s.observation.url,
+      };
+    }
+    return out;
+  });
+}
+
+function clearAllPersist() {
+  localStorage.removeItem(STORAGE_KEY);
+  for (const k of LEGACY_KEYS) localStorage.removeItem(k);
+  sessionId = crypto.randomUUID();
+  browseSessionId = "";
+  snapshot = null;
+  messages = [];
+  lastBrowseSteps = [];
+  hideBrowseConfirm();
+  log.innerHTML = "";
+  addWelcome();
+  persist();
+}
+
+/* ---------- UI helpers ---------- */
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
 
 function redactBrowseGoal(goal) {
   let g = String(goal || "");
@@ -60,30 +194,27 @@ function redactBrowseGoal(goal) {
   return g;
 }
 
-function hideBrowseConfirm() {
-  pendingBrowseConfirm = null;
-  if (browseConfirm) browseConfirm.hidden = true;
-  if (browseConfirmHint) {
-    browseConfirmHint.hidden = true;
-    browseConfirmHint.textContent = "";
+function showState(s) {
+  if (!s || uiMode === "secretary") {
+    if (uiMode === "secretary") stateEl.textContent = "";
+    return;
   }
+  stateEl.textContent = `집착 ${s.obsession} · 애착 ${s.attachment} · 불안 ${s.stress} · 반추 ${s.rumination} · ${s.emotion}`;
 }
 
-function showBrowseConfirm(data, goal) {
-  pendingBrowseConfirm = {
-    goal,
-    session_id: data.session_id || browseSessionId || sessionId || undefined,
-    needs_confirm: data.needs_confirm,
-  };
-  const nc = data.needs_confirm || {};
-  const host = nc.host ? String(nc.host) : "";
-  if (browseConfirm) browseConfirm.hidden = false;
-  if (browseConfirmHint) {
-    browseConfirmHint.hidden = false;
-    browseConfirmHint.textContent = host
-      ? `${host} 로그인/비밀번호 입력을 이 세션에서 허용할까? (비밀번호는 저장하지 않아)`
-      : "로그인/비밀번호 입력을 허용하고 같은 목표로 다시 시도할까? (비밀번호는 저장하지 않아)";
+function setUiMode(mode) {
+  uiMode = mode === "rp" ? "rp" : "secretary";
+  modeSecretaryBtn.setAttribute("aria-pressed", uiMode === "secretary" ? "true" : "false");
+  modeRpBtn.setAttribute("aria-pressed", uiMode === "rp" ? "true" : "false");
+  if (uiMode === "secretary") {
+    headerSub.textContent = "개인 비서 · 일 시키면 알아서 처리";
+    input.placeholder = "말해 봐. 검색·열어·확인해… 자연스럽게 시키면 돼";
+    stateEl.textContent = "";
+  } else {
+    headerSub.textContent = "집착 동역학 롤플레이 · 상태는 말투로만";
+    input.placeholder = "말해 봐. /state /reset /silence · 웹은 /웹 …";
   }
+  persist();
 }
 
 function addBubble(text, role, scroll = true) {
@@ -95,80 +226,18 @@ function addBubble(text, role, scroll = true) {
   return el;
 }
 
-function showState(s) {
-  if (!s) return;
-  stateEl.textContent = `집착 ${s.obsession} · 애착 ${s.attachment} · 불안 ${s.stress} · 반추 ${s.rumination} · ${s.emotion}`;
-}
-
-function persist() {
-  if (sessionId) localStorage.setItem("chaeti_session", sessionId);
-  if (snapshot) localStorage.setItem("chaeti_snapshot", JSON.stringify(snapshot));
-  localStorage.setItem("chaeti_history", JSON.stringify(history.slice(-40)));
-}
-
-if (!history.length) {
-  addBubble("…왔어? 나 채티야. 편하게 말해도 돼. (/reset /state /silence)", "bot");
-}
-
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const message = input.value.trim();
-  if (!message) return;
-  input.value = "";
-  addBubble(message === "/silence" ? "(침묵)" : message, "user");
-  if (!message.startsWith("/")) history.push({ role: "user", content: message });
-  const btn = form.querySelector("button");
-  btn.disabled = true;
-  const pending = addBubble("…", "bot");
-  try {
-    const res = await fetch(`${API_BASE}/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message,
-        history,
-        session_id: sessionId || undefined,
-        snapshot: snapshot || undefined,
-      }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (data.session_id) sessionId = data.session_id;
-    if (data.snapshot) snapshot = data.snapshot;
-    const reply = data.reply || data.error || "응답이 비었네.";
-    pending.textContent = reply;
-    if (!res.ok) pending.classList.add("err");
-    showState(data.state);
-    if (message.trim() === "/reset") {
-      history.length = 0;
-      log.innerHTML = "";
-      addBubble(reply, "bot");
-    } else if (!message.startsWith("/")) {
-      history.push({ role: "assistant", content: reply });
-    }
-    persist();
-  } catch (err) {
-    pending.textContent = "연결이 안 되네. " + String(err.message || err);
-    pending.classList.add("err");
-  } finally {
-    btn.disabled = false;
-    input.focus();
+function addWelcome() {
+  if (uiMode === "secretary") {
+    addBubble("나 채티야. 시킬 일 있으면 그냥 말해 — 검색·사이트 열기·확인 같은 건 내가 알아서 웹으로 처리할게.", "bot");
+  } else {
+    addBubble("…왔어? 나 채티야. 편하게 말해도 돼. (/reset /state /silence)", "bot");
   }
-});
+}
 
-/* ---------- browse panel (additive; RP chat untouched) ---------- */
-
-const TOOL_KO = {
-  open: "열기",
-  click: "클릭",
-  type: "입력",
-  scroll: "스크롤",
-  screenshot: "캡처",
-  done: "끝",
-};
-
-function setBrowseStatus(kind, label) {
-  browseStatus.className = "browse-status " + kind;
-  browseStatus.textContent = label;
+function inferType(s) {
+  if (s.tool || s.action) return "tool";
+  if (s.observation && !s.content) return "observe";
+  return "think";
 }
 
 function formatArgs(args) {
@@ -186,25 +255,36 @@ function formatArgs(args) {
   return parts.join(" · ");
 }
 
-/** Render Claude-style timeline: think / tool / observe */
-function renderSteps(steps, meta) {
-  browseSteps.innerHTML = "";
-  if (!Array.isArray(steps) || !steps.length) {
-    browseThinkMeta.textContent = "";
-    return;
-  }
-  const thinks = steps.filter((s) => (s.type || inferType(s)) === "think").length;
-  const tools = steps.filter((s) => (s.type || inferType(s)) === "tool").length;
+function formatObserve(obs) {
+  if (!obs) return "";
+  const bits = [];
+  if (obs.title) bits.push(String(obs.title).slice(0, 60));
+  if (obs.url) bits.push(String(obs.url).slice(0, 60));
+  return bits.join(" · ");
+}
+
+/** Build inline thinking timeline (details) for a browse turn */
+function buildTimelineEl(steps, meta) {
+  const details = document.createElement("details");
+  details.className = "inline-thinking";
+  details.open = true;
+  const thinks = (steps || []).filter((s) => (s.type || inferType(s)) === "think").length;
+  const tools = (steps || []).filter((s) => (s.type || inferType(s)) === "tool").length;
   const llmBit = meta?.llm ? ` · ${meta.llm}` : "";
   const modelBit = meta?.model ? `/${meta.model}` : "";
-  browseThinkMeta.textContent = `${thinks}생각 · ${tools}도구${llmBit}${modelBit}`;
+  const summary = document.createElement("summary");
+  summary.innerHTML =
+    `생각 중 <span class="think-meta">${thinks}생각 · ${tools}도구${escapeHtml(llmBit)}${escapeHtml(modelBit)}</span>`;
+  details.appendChild(summary);
 
-  for (const s of steps) {
+  const ol = document.createElement("ol");
+  ol.className = "browse-steps";
+  ol.setAttribute("aria-label", "생각·도구 타임라인");
+  for (const s of steps || []) {
     const type = s.type || inferType(s);
     const li = document.createElement("li");
     const ok = s.ok !== false;
     li.className = `step-${type}` + (type === "tool" ? (ok ? " step-ok" : " step-fail") : "");
-
     let label = "";
     let body = "";
     if (type === "think") {
@@ -216,118 +296,184 @@ function renderSteps(steps, meta) {
     } else {
       const tool = s.tool || s.action || "?";
       label = TOOL_KO[tool] || tool;
-      body =
-        s.content ||
-        formatArgs(s.args) ||
-        s.message ||
-        s.error ||
-        "";
+      body = s.content || formatArgs(s.args) || s.message || s.error || "";
       const obs = s.observation;
       if (obs && (obs.title || obs.url) && !s.content) {
         body += ` → ${(obs.title || "").slice(0, 40)}${obs.url ? " · " + String(obs.url).slice(0, 48) : ""}`;
       }
     }
-    li.innerHTML =
-      `<span class="step-label">${escapeHtml(label)}</span>` + escapeHtml(body);
-    browseSteps.appendChild(li);
+    li.innerHTML = `<span class="step-label">${escapeHtml(label)}</span>${escapeHtml(body)}`;
+    ol.appendChild(li);
   }
-  browseSteps.scrollTop = browseSteps.scrollHeight;
-  if (browseThinking) browseThinking.open = true;
+  details.appendChild(ol);
+  return details;
 }
 
-function inferType(s) {
-  if (s.tool || s.action) return "tool";
-  if (s.observation && !s.content) return "observe";
-  return "think";
+function addBrowseReply(reply, steps, meta, isErr) {
+  const wrap = document.createElement("div");
+  wrap.className = "bubble browse" + (isErr ? " err" : "");
+  if (steps && steps.length) {
+    wrap.appendChild(buildTimelineEl(steps, meta));
+  }
+  const text = document.createElement("div");
+  text.className = "browse-reply-text";
+  text.textContent = reply;
+  wrap.appendChild(text);
+  log.appendChild(wrap);
+  log.scrollTop = log.scrollHeight;
+  return wrap;
 }
 
-function formatObserve(obs) {
-  if (!obs) return "";
-  const bits = [];
-  if (obs.title) bits.push(String(obs.title).slice(0, 60));
-  if (obs.url) bits.push(String(obs.url).slice(0, 60));
-  return bits.join(" · ");
+function hideBrowseConfirm() {
+  pendingBrowseConfirm = null;
+  if (loginConfirmBar) loginConfirmBar.hidden = true;
+  if (loginConfirmHint) loginConfirmHint.textContent = "";
 }
 
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+function showBrowseConfirm(data, goal) {
+  pendingBrowseConfirm = {
+    goal,
+    session_id: data.session_id || browseSessionId || sessionId || undefined,
+    needs_confirm: data.needs_confirm,
+  };
+  const nc = data.needs_confirm || {};
+  const host = nc.host ? String(nc.host) : "";
+  if (loginConfirmBar) loginConfirmBar.hidden = false;
+  if (loginConfirmHint) {
+    loginConfirmHint.textContent = host
+      ? `${host} 로그인/비밀번호 입력을 이 세션에서 허용할까? (비밀번호는 저장하지 않아)`
+      : "로그인/비밀번호 입력을 허용하고 같은 목표로 다시 시도할까? (비밀번호는 저장하지 않아)";
+  }
 }
 
-function extractScreenshot(data) {
-  if (!data) return null;
-  const candidates = [
-    data.last_screenshot,
-    data.screenshot_url,
-    data.screenshot_b64,
-    data.screenshot,
-  ];
-  if (Array.isArray(data.steps)) {
-    for (let i = data.steps.length - 1; i >= 0; i--) {
-      const o = data.steps[i]?.observation || {};
-      candidates.push(o.screenshot_url, o.screenshot_b64, o.screenshot, o.image_url);
+/* ---------- restore ---------- */
+
+(function init() {
+  const store = loadStore();
+  sessionId = store.session_id || crypto.randomUUID();
+  browseSessionId = store.browse_session_id || "";
+  snapshot = store.snapshot || null;
+  uiMode = store.mode === "rp" ? "rp" : "secretary";
+  lastBrowseSteps = Array.isArray(store.last_browse_steps) ? store.last_browse_steps : [];
+  setUiMode(uiMode);
+
+  if (Array.isArray(store.messages) && store.messages.length) {
+    messages = store.messages.slice(-60);
+    for (const m of messages) {
+      if (m.kind === "browse" && m.role === "assistant") {
+        addBrowseReply(m.content, m.steps || [], m.meta || {}, false);
+      } else if (m.role === "user") {
+        addBubble(m.content, "user", false);
+      } else {
+        addBubble(m.content, m.role === "browse" ? "browse" : "bot", false);
+      }
     }
+    log.scrollTop = log.scrollHeight;
+  } else {
+    addWelcome();
   }
-  for (const c of candidates) {
-    if (!c || typeof c !== "string") continue;
-    if (/^https?:\/\//i.test(c) || c.startsWith("data:image")) return c;
-    if (/^[A-Za-z0-9+/=\s]+$/.test(c) && c.replace(/\s/g, "").length > 80) {
-      return "data:image/png;base64," + c.replace(/\s/g, "");
-    }
-  }
-  return null;
-}
+  persist();
+})();
 
-function showScreenshot(src) {
-  if (!src) {
-    browseShotWrap.hidden = true;
-    browseShot.removeAttribute("src");
+modeSecretaryBtn.addEventListener("click", () => setUiMode("secretary"));
+modeRpBtn.addEventListener("click", () => setUiMode("rp"));
+clearPersistBtn.addEventListener("click", () => {
+  if (confirm("이 기기에 저장된 대화·상태를 지울까?")) clearAllPersist();
+});
+
+/* ---------- chat / browse from single input ---------- */
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const message = input.value.trim();
+  if (!message) return;
+  input.value = "";
+
+  if (shouldBrowse(message)) {
+    await runBrowseTurn(stripWebPrefix(message) || message, { fromConfirm: false });
     return;
   }
-  browseShot.src = src;
-  browseShotWrap.hidden = false;
+
+  await runChatTurn(message);
+});
+
+async function runChatTurn(message) {
+  addBubble(message === "/silence" ? "(침묵)" : message, "user");
+  if (!message.startsWith("/")) {
+    messages.push({ role: "user", content: message, kind: "chat" });
+  }
+  const btn = form.querySelector("button");
+  btn.disabled = true;
+  const pending = addBubble("…", "bot");
+  try {
+    const res = await fetch(`${API_BASE}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message,
+        history: messages
+          .filter((m) => m.kind !== "browse" || m.role === "user")
+          .map((m) => ({
+            role: m.role === "assistant" || m.role === "bot" ? "assistant" : "user",
+            content: m.content,
+          }))
+          .slice(-24),
+        session_id: sessionId || undefined,
+        snapshot: snapshot || undefined,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data.session_id) sessionId = data.session_id;
+    if (data.snapshot) snapshot = data.snapshot;
+    const reply = data.reply || data.error || "응답이 비었네.";
+    pending.textContent = reply;
+    if (!res.ok) pending.classList.add("err");
+    showState(data.state);
+    if (message.trim() === "/reset") {
+      messages = [];
+      snapshot = data.snapshot || null;
+      log.innerHTML = "";
+      addBubble(reply, "bot");
+      messages.push({ role: "assistant", content: reply, kind: "chat" });
+    } else if (!message.startsWith("/")) {
+      messages.push({ role: "assistant", content: reply, kind: "chat" });
+    }
+    persist();
+  } catch (err) {
+    pending.textContent = "연결이 안 되네. " + String(err.message || err);
+    pending.classList.add("err");
+  } finally {
+    btn.disabled = false;
+    input.focus();
+  }
 }
 
-browseToggle.addEventListener("click", () => {
-  const open = browsePanel.hidden;
-  browsePanel.hidden = !open;
-  browseToggle.setAttribute("aria-pressed", open ? "true" : "false");
-  if (open) browseGoal.focus();
-});
-
-browseRun.addEventListener("click", runBrowse);
-browseGoal.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault();
-    runBrowse();
-  }
-});
-
-async function runBrowse(opts = {}) {
+async function runBrowseTurn(goal, opts = {}) {
   const fromConfirm = Boolean(opts.fromConfirm);
-  const goal = (opts.goal != null ? opts.goal : browseGoal.value).trim();
-  if (!goal) {
-    browseGoal.focus();
-    return;
-  }
-  browseRun.disabled = true;
+  if (!goal) return;
+
+  const btn = form.querySelector("button");
+  btn.disabled = true;
   if (browseConfirm) browseConfirm.disabled = true;
   if (!fromConfirm) hideBrowseConfirm();
-  setBrowseStatus("running", fromConfirm ? "확인 후 계속…" : "생각·탐색 중…");
-  browseSteps.innerHTML = "";
-  browseThinkMeta.textContent = "진행 중";
-  if (browseThinking) browseThinking.open = true;
-  showScreenshot(null);
 
+  const displayGoal = redactBrowseGoal(goal);
   if (!fromConfirm) {
-    addBubble(`〔웹〕 ${redactBrowseGoal(goal)}`, "user");
+    addBubble(displayGoal, "user");
+    messages.push({ role: "user", content: displayGoal, kind: "browse" });
   } else {
-    addBubble("〔웹〕 로그인 허용하고 같은 목표로 계속", "user");
+    addBubble("로그인 허용하고 같은 목표로 계속", "user");
+    messages.push({ role: "user", content: "로그인 허용하고 같은 목표로 계속", kind: "browse" });
   }
-  const pending = addBubble("웹 심부름 가는 중… (생각 과정은 위 패널)", "browse");
+
+  const pendingWrap = document.createElement("div");
+  pendingWrap.className = "bubble browse";
+  const pendingText = document.createElement("div");
+  pendingText.className = "browse-reply-text";
+  pendingText.textContent = "처리 중…";
+  pendingWrap.appendChild(pendingText);
+  log.appendChild(pendingWrap);
+  log.scrollTop = log.scrollHeight;
 
   const confirmPayload = fromConfirm
     ? {
@@ -338,7 +484,9 @@ async function runBrowse(opts = {}) {
           ...(opts.host ? [opts.host] : []),
         ].filter(Boolean),
         approved_action_id:
-          (pendingBrowseConfirm && pendingBrowseConfirm.needs_confirm && pendingBrowseConfirm.needs_confirm.action_id) ||
+          (pendingBrowseConfirm &&
+            pendingBrowseConfirm.needs_confirm &&
+            pendingBrowseConfirm.needs_confirm.action_id) ||
           "type_password",
       }
     : browseApprovedHosts.length
@@ -359,49 +507,61 @@ async function runBrowse(opts = {}) {
     });
     const data = await res.json().catch(() => ({}));
     const ms = Math.round(performance.now() - t0);
-    if (data.session_id) {
-      browseSessionId = data.session_id;
-      // RP sessionId stays separate; do not write browse secrets into chaeti_snapshot
-    }
-    renderSteps(data.steps, { llm: data.llm, model: data.model });
-    showScreenshot(extractScreenshot(data));
+    if (data.session_id) browseSessionId = data.session_id;
 
+    const steps = Array.isArray(data.steps) ? data.steps : [];
+    lastBrowseSteps = steps;
+    const meta = { llm: data.llm, model: data.model, ms };
     const reply =
       data.reply ||
       data.error ||
       (res.ok ? "끝났어." : "실패했어.");
-    pending.textContent = reply + `\n(${ms}ms · ${data.llm || "?"}${data.model ? " / " + data.model : ""})`;
+    const footer = `\n(${ms}ms · ${data.llm || "?"}${data.model ? " / " + data.model : ""})`;
+
+    pendingWrap.remove();
+    let isErr = false;
+    let finalReply = reply + footer;
 
     if (data.needs_confirm) {
-      pending.classList.add("err");
-      setBrowseStatus("confirm", "확인 필요");
+      isErr = true;
       const host = data.needs_confirm.host ? String(data.needs_confirm.host) : "";
-      pending.textContent =
+      finalReply =
         reply +
         "\n(로그인/비밀번호 확인이 필요해" +
         (host ? `: ${host}` : "") +
-        ". 위 「로그인 허용하고 계속」을 눌러줘)";
+        ". 아래 「로그인 허용하고 계속」을 눌러줘)";
       showBrowseConfirm(data, goal);
     } else if (!res.ok || data.ok === false) {
-      pending.classList.add("err");
-      setBrowseStatus("error", data.error === "browser_not_configured" ? "미연결" : "오류");
+      isErr = true;
       hideBrowseConfirm();
     } else {
-      setBrowseStatus("done", `완료 ${Math.round(ms / 1000)}s`);
       if (fromConfirm && opts.host) {
         const h = String(opts.host).toLowerCase();
         if (h && !browseApprovedHosts.includes(h)) browseApprovedHosts.push(h);
       }
       hideBrowseConfirm();
     }
+
+    addBrowseReply(finalReply, steps, meta, isErr);
+    messages.push({
+      role: "assistant",
+      content: finalReply,
+      kind: "browse",
+      steps: summarizeSteps(steps),
+      meta,
+    });
+    persist();
   } catch (err) {
-    pending.textContent = "웹 연결이 안 되네. " + String(err.message || err);
-    pending.classList.add("err");
-    setBrowseStatus("error", "오류");
+    pendingWrap.remove();
+    const msg = "웹 연결이 안 되네. " + String(err.message || err);
+    addBrowseReply(msg, [], {}, true);
+    messages.push({ role: "assistant", content: msg, kind: "browse" });
     hideBrowseConfirm();
+    persist();
   } finally {
-    browseRun.disabled = false;
+    btn.disabled = false;
     if (browseConfirm) browseConfirm.disabled = false;
+    input.focus();
   }
 }
 
@@ -413,6 +573,6 @@ if (browseConfirm) {
     if (host && !browseApprovedHosts.includes(host.toLowerCase())) {
       browseApprovedHosts.push(host.toLowerCase());
     }
-    runBrowse({ fromConfirm: true, goal, host });
+    runBrowseTurn(goal, { fromConfirm: true, host });
   });
 }
