@@ -64,21 +64,22 @@ npx wrangler secret put ANTHROPIC_API_KEY
 | `open` | `url` | 페이지 이동 (+ 스크린샷) |
 | `screenshot` | (없음) | 관찰용 PNG + URL/제목/텍스트 |
 | `click` | `selector` 또는 `x,y` | 클릭 |
-| `type` | `selector`, `text`, `submit?` | 입력 (비밀번호는 confirm) |
+| `type` | `selector`, `text`, `submit?` | 입력 (비밀번호: 허용 목록+goal 자격증명 후 세션 1회 confirm) |
 | `scroll` | `direction`, `amount?` | 스크롤 |
 | `done` | `summary` | 한국어 요약 후 종료 |
 
 루프 개선: 최대 20 step, 도구 오류 1회 재시도, 2액션마다 자동 screenshot 관찰, 한국어 summary.
 
-## 5/n 단계 — 안전 (stubs, 반드시 유지)
+## 5/n 단계 — 안전 (반드시 유지)
 
 구현: `worker/src/browser/safety.js`
 
-1. **결제/은행 차단**
-2. **로그인/비밀번호** — `needs_confirm`
-3. **자격증명 자동 전송 금지**
-4. **CSAM / 범죄 거부**
-5. **허용 목록(옵션)** — 스텁
+1. **결제/은행/암호화폐 거래소 차단** — open·click·type 모두 거부
+2. **CSAM / 범죄 / 신분증 위조 거부**
+3. **개발 도구 로그인 허용 목록** — github.com, gitlab.com, bitbucket.org, cloudflare, anthropic/google/groq 콘솔, vercel/netlify/railway/render/fly, npm/pypi, kaggle/huggingface, ngrok, linear/sentry/pagerduty
+4. **허용 목록 + goal에 이메일·비밀번호(또는 「저장된 세션 사용」)** → 비밀번호 type 가능. **호스트당 세션 1회** `needs_confirm` 후 `confirm.allow_credentials` / `approved_hosts` 로 재개
+5. **허용 목록 밖** — 기존처럼 비밀번호는 확인 게이트(은행·결제는 하드 블록)
+6. **비밀 미저장** — steps/UI에서 비밀번호 `***` 마스킹. 프론트는 승인 호스트만 메모리 보관, **localStorage에 비밀번호 저장 금지**
 
 ## 6/n 단계 — API
 
@@ -89,7 +90,7 @@ npx wrangler secret put ANTHROPIC_API_KEY
   "goal": "example.com 열어서 제목 알려줘",
   "session_id": "optional",
   "max_steps": 12,
-  "confirm": { "allow_credentials": false, "allow_login": false }
+  "confirm": { "allow_credentials": false, "allow_login": false, "approved_hosts": [] }
 }
 ```
 

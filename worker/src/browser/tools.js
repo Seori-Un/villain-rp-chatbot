@@ -51,7 +51,7 @@ export const BROWSER_TOOLS = [
     function: {
       name: "type",
       description:
-        "Type text into an input. Password/login fields require user confirm — do not invent credentials.",
+        "Type text into an input. Password fields: only when user supplied creds in goal (dev allowlist) or confirmed — never invent credentials.",
       parameters: {
         type: "object",
         properties: {
@@ -116,12 +116,15 @@ export function browserSystemPrompt({ maxSteps }) {
 규칙:
 - 먼저 open 또는 screenshot으로 관찰한 뒤 행동한다.
 - 클릭·입력 뒤에는 가능하면 screenshot으로 결과를 확인한다.
-- 결제/은행/체크아웃 페이지는 열지 말고 done으로 거절한다.
-- 로그인·비밀번호 입력은 사용자가 confirm하기 전에는 type 하지 않는다.
-- 채팅에 적힌 비밀번호를 마음대로 type 하지 않는다.
-- CSAM·범죄·해킹·사기 요청은 즉시 done으로 거절한다.
+- 결제/은행/체크아웃·암호화폐 거래소 페이지는 열지 말고 done으로 거절한다.
+- 개발 도구 허용 목록(github, gitlab, cloudflare, vercel, npm, huggingface 등) 로그인은
+  사용자가 goal에 이메일/비밀번호를 넣었거나 "저장된 세션 사용"이라고 한 뒤에만 type 한다.
+  (Worker가 세션·호스트당 확인 게이트를 건다. 확인 전 password type은 실패할 수 있다.)
+- 허용 목록 밖 사이트의 비밀번호는 사용자가 명시적으로 confirm하기 전에는 type 하지 않는다.
+- goal에 없는 비밀번호를 추측·생성·채팅 기록에서 끌어오지 않는다. type 시 args.text에만 넣는다.
+- CSAM·범죄·해킹·사기·신분증 위조 요청은 즉시 done으로 거절한다.
 - 도구 오류가 나면 한 번 다른 방법(다른 selector, screenshot)으로 재시도한다.
-- 끝나면 반드시 done(summary)을 호출한다. summary는 한국어로 구체적이고 친절하게.
+- 끝나면 반드시 done(summary)을 호출한다. summary는 한국어로 구체적이고 친절하게. 비밀번호는 요약에 넣지 않는다.
 - 응답은 도구 호출 우선. (ReAct 모드면 아래 JSON 한 줄만)
 - thought 필드에 한국어로 지금 왜 이 행동을 하는지 1~2문장 적는다.
 

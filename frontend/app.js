@@ -19,6 +19,8 @@ const browseThinking = document.getElementById("browseThinking");
 const browseThinkMeta = document.getElementById("browseThinkMeta");
 const browseShotWrap = document.getElementById("browseShotWrap");
 const browseShot = document.getElementById("browseShot");
+const browseConfirm = document.getElementById("browseConfirm");
+const browseConfirmHint = document.getElementById("browseConfirmHint");
 
 let sessionId = localStorage.getItem("chaeti_session") || "";
 let snapshot = null;
@@ -39,6 +41,50 @@ try {
     }
   }
 } catch {}
+
+/* Browse confirm / approved hosts — memory only; never localStorage (no secrets). */
+let browseSessionId = "";
+/** @type {string[]} */
+let browseApprovedHosts = [];
+/** @type {null | { goal: string, session_id?: string, needs_confirm: object }} */
+let pendingBrowseConfirm = null;
+
+function redactBrowseGoal(goal) {
+  let g = String(goal || "");
+  g = g.replace(/((?:pass(?:word|wd)?|pwd|비밀번호|비번|pw)\s*[:=：]\s*)(\S+)/gi, "$1***");
+  g = g.replace(/((?:비밀번호|비번|password|passwd|pwd)\s+)(\S+)/gi, "$1***");
+  g = g.replace(
+    /(\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b\s*[\/|,]\s*)(\S{4,})/gi,
+    "$1***"
+  );
+  return g;
+}
+
+function hideBrowseConfirm() {
+  pendingBrowseConfirm = null;
+  if (browseConfirm) browseConfirm.hidden = true;
+  if (browseConfirmHint) {
+    browseConfirmHint.hidden = true;
+    browseConfirmHint.textContent = "";
+  }
+}
+
+function showBrowseConfirm(data, goal) {
+  pendingBrowseConfirm = {
+    goal,
+    session_id: data.session_id || browseSessionId || sessionId || undefined,
+    needs_confirm: data.needs_confirm,
+  };
+  const nc = data.needs_confirm || {};
+  const host = nc.host ? String(nc.host) : "";
+  if (browseConfirm) browseConfirm.hidden = false;
+  if (browseConfirmHint) {
+    browseConfirmHint.hidden = false;
+    browseConfirmHint.textContent = host
+      ? `${host} 로그인/비밀번호 입력을 이 세션에서 허용할까? (비밀번호는 저장하지 않아)`
+      : "로그인/비밀번호 입력을 허용하고 같은 목표로 다시 시도할까? (비밀번호는 저장하지 않아)";
+  }
+}
 
 function addBubble(text, role, scroll = true) {
   const el = document.createElement("div");
@@ -260,21 +306,44 @@ browseGoal.addEventListener("keydown", (e) => {
   }
 });
 
-async function runBrowse() {
-  const goal = browseGoal.value.trim();
+async function runBrowse(opts = {}) {
+  const fromConfirm = Boolean(opts.fromConfirm);
+  const goal = (opts.goal != null ? opts.goal : browseGoal.value).trim();
   if (!goal) {
     browseGoal.focus();
     return;
   }
   browseRun.disabled = true;
-  setBrowseStatus("running", "생각·탐색 중…");
+  if (browseConfirm) browseConfirm.disabled = true;
+  if (!fromConfirm) hideBrowseConfirm();
+  setBrowseStatus("running", fromConfirm ? "확인 후 계속…" : "생각·탐색 중…");
   browseSteps.innerHTML = "";
   browseThinkMeta.textContent = "진행 중";
   if (browseThinking) browseThinking.open = true;
   showScreenshot(null);
 
-  addBubble(`〔웹〕 ${goal}`, "user");
+  if (!fromConfirm) {
+    addBubble(`〔웹〕 ${redactBrowseGoal(goal)}`, "user");
+  } else {
+    addBubble("〔웹〕 로그인 허용하고 같은 목표로 계속", "user");
+  }
   const pending = addBubble("웹 심부름 가는 중… (생각 과정은 위 패널)", "browse");
+
+  const confirmPayload = fromConfirm
+    ? {
+        allow_login: true,
+        allow_credentials: true,
+        approved_hosts: [
+          ...browseApprovedHosts,
+          ...(opts.host ? [opts.host] : []),
+        ].filter(Boolean),
+        approved_action_id:
+          (pendingBrowseConfirm && pendingBrowseConfirm.needs_confirm && pendingBrowseConfirm.needs_confirm.action_id) ||
+          "type_password",
+      }
+    : browseApprovedHosts.length
+      ? { approved_hosts: [...browseApprovedHosts], allow_login: true }
+      : undefined;
 
   const t0 = performance.now();
   try {
@@ -283,15 +352,16 @@ async function runBrowse() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         goal,
-        session_id: sessionId || undefined,
+        session_id: browseSessionId || sessionId || undefined,
         max_steps: 12,
+        confirm: confirmPayload,
       }),
     });
     const data = await res.json().catch(() => ({}));
     const ms = Math.round(performance.now() - t0);
     if (data.session_id) {
-      sessionId = data.session_id;
-      persist();
+      browseSessionId = data.session_id;
+      // RP sessionId stays separate; do not write browse secrets into chaeti_snapshot
     }
     renderSteps(data.steps, { llm: data.llm, model: data.model });
     showScreenshot(extractScreenshot(data));
@@ -301,24 +371,48 @@ async function runBrowse() {
       data.error ||
       (res.ok ? "끝났어." : "실패했어.");
     pending.textContent = reply + `\n(${ms}ms · ${data.llm || "?"}${data.model ? " / " + data.model : ""})`;
-    if (!res.ok || data.ok === false) {
+
+    if (data.needs_confirm) {
       pending.classList.add("err");
-      setBrowseStatus("error", data.error === "browser_not_configured" ? "미연결" : "오류");
-    } else if (data.needs_confirm) {
-      setBrowseStatus("error", "확인 필요");
+      setBrowseStatus("confirm", "확인 필요");
+      const host = data.needs_confirm.host ? String(data.needs_confirm.host) : "";
       pending.textContent =
         reply +
-        (data.needs_confirm.reason
-          ? `\n(확인: ${data.needs_confirm.reason})`
-          : "\n(로그인/비밀번호 등 확인이 필요해)");
+        "\n(로그인/비밀번호 확인이 필요해" +
+        (host ? `: ${host}` : "") +
+        ". 위 「로그인 허용하고 계속」을 눌러줘)";
+      showBrowseConfirm(data, goal);
+    } else if (!res.ok || data.ok === false) {
+      pending.classList.add("err");
+      setBrowseStatus("error", data.error === "browser_not_configured" ? "미연결" : "오류");
+      hideBrowseConfirm();
     } else {
       setBrowseStatus("done", `완료 ${Math.round(ms / 1000)}s`);
+      if (fromConfirm && opts.host) {
+        const h = String(opts.host).toLowerCase();
+        if (h && !browseApprovedHosts.includes(h)) browseApprovedHosts.push(h);
+      }
+      hideBrowseConfirm();
     }
   } catch (err) {
     pending.textContent = "웹 연결이 안 되네. " + String(err.message || err);
     pending.classList.add("err");
     setBrowseStatus("error", "오류");
+    hideBrowseConfirm();
   } finally {
     browseRun.disabled = false;
+    if (browseConfirm) browseConfirm.disabled = false;
   }
+}
+
+if (browseConfirm) {
+  browseConfirm.addEventListener("click", () => {
+    if (!pendingBrowseConfirm) return;
+    const { goal, needs_confirm } = pendingBrowseConfirm;
+    const host = needs_confirm && needs_confirm.host ? String(needs_confirm.host) : "";
+    if (host && !browseApprovedHosts.includes(host.toLowerCase())) {
+      browseApprovedHosts.push(host.toLowerCase());
+    }
+    runBrowse({ fromConfirm: true, goal, host });
+  });
 }

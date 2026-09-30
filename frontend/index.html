@@ -28,8 +28,10 @@
       <textarea id="browseGoal" rows="2" placeholder="예: example.com 열어서 제목 알려줘"></textarea>
       <div class="browse-actions">
         <button type="button" id="browseRun">시켜보기</button>
+        <button type="button" id="browseConfirm" class="browse-confirm" hidden>로그인 허용하고 계속</button>
         <span id="browseStatus" class="browse-status idle" aria-live="polite">대기</span>
       </div>
+      <p id="browseConfirmHint" class="browse-confirm-hint" hidden></p>
       <details id="browseThinking" class="browse-thinking" open>
         <summary>생각 중 <span id="browseThinkMeta" class="think-meta"></span></summary>
         <ol id="browseSteps" class="browse-steps" aria-label="생각·도구 타임라인"></ol>

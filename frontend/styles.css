@@ -285,3 +285,21 @@ code { color: #cfc8c0; }
 }
 .browse-steps .step-think .step-label { color: #d4b896; }
 .browse-steps .step-observe .step-label { color: #7eb89a; }
+
+#browseConfirm.browse-confirm {
+  border: 1px solid #5a4a22;
+  background: #2a2210;
+  color: #f0e0a8;
+  border-radius: 8px;
+  padding: 0.45rem 0.85rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+#browseConfirm.browse-confirm:disabled { opacity: 0.5; cursor: wait; }
+.browse-confirm-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.78rem;
+  color: #d4b896;
+}
+.browse-confirm-hint[hidden] { display: none !important; }
+.browse-status.confirm { color: #f0e0a8; border-color: #5a4a22; background: #1a1610; }

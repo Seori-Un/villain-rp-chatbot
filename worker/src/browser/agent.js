@@ -5,7 +5,7 @@
  */
 
 import { browserSystemPrompt, TOOL_NAMES } from "./tools.js";
-import { checkGoal, checkAction } from "./safety.js";
+import { checkGoal, checkAction, extractGoalCredentials } from "./safety.js";
 import { browserAct, compactObservation } from "./client.js";
 import { planBrowseStep, resolveBrowseLlm } from "./llm.js";
 
@@ -30,6 +30,9 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 12, c
       llm: resolveBrowseLlm(env).note,
     };
   }
+
+  const goalCreds = extractGoalCredentials(goal);
+  const confirmState = normalizeConfirm(confirm);
 
   const llmInfo = resolveBrowseLlm(env);
   if (!llmInfo.provider) {
@@ -71,9 +74,12 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 12, c
   let finalSummary = null;
   let consecutivePlanFails = 0;
 
+  const credNote = goalCreds.present
+    ? " · 자격증명 감지됨 — 허용 목록 호스트는 세션당 1회 확인 후 입력"
+    : "";
   pushStep(steps, {
     type: "think",
-    content: `목표를 확인했어. 웹을 탐색할게. (선호 LLM: ${llmInfo.provider})`,
+    content: `목표를 확인했어. 웹을 탐색할게. (선호 LLM: ${llmInfo.provider}${credNote})`,
   });
 
   for (let n = 1; n <= maxSteps; n++) {
@@ -230,7 +236,18 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 12, c
         });
       }
 
-      const safe = checkAction(act, confirm, page);
+      const safe = checkAction(act, confirmState, {
+        ...page,
+        goal,
+        goalCreds,
+      });
+      // Remember host approval for rest of this run if confirm already granted
+      if (safe.ok && act.action === "type" && confirmState.allow_credentials) {
+        const h = safeHost(page.url);
+        if (h && !confirmState.approved_hosts.includes(h)) {
+          confirmState.approved_hosts.push(h);
+        }
+      }
       if (!safe.ok) {
         pushStep(steps, {
           type: "tool",
@@ -478,10 +495,32 @@ function finish({
   return out;
 }
 
+function normalizeConfirm(confirm = {}) {
+  const c = confirm && typeof confirm === "object" ? { ...confirm } : {};
+  const hosts = Array.isArray(c.approved_hosts)
+    ? c.approved_hosts.map((h) => String(h).toLowerCase()).filter(Boolean)
+    : [];
+  c.approved_hosts = hosts;
+  return c;
+}
+
+function safeHost(url) {
+  try {
+    return new URL(String(url || "")).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 function redactArgs(args) {
   if (!args || typeof args !== "object") return args;
   const copy = { ...args };
-  if (copy.is_password || /password|비밀번호/i.test(String(copy.selector || ""))) {
+  const sel = String(copy.selector || "");
+  if (
+    copy.is_password ||
+    /password|passwd|pwd|비밀번호/i.test(sel) ||
+    /type\s*=\s*["']?password/i.test(sel)
+  ) {
     if (copy.text) copy.text = "***";
   }
   return copy;
@@ -498,7 +537,7 @@ function appendToolResult(messages, act, mode, planned, compact) {
           .map((a) => ({
             id: a.id,
             type: "function",
-            function: { name: a.action, arguments: JSON.stringify(a.args || {}) },
+            function: { name: a.action, arguments: JSON.stringify(redactArgs(a.args || {})) },
           })),
       });
       planned._assistantPushed = true;
