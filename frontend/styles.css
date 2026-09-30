@@ -87,3 +87,10 @@ button {
 button:disabled { opacity: 0.5; cursor: wait; }
 .hint { color: var(--muted); font-size: 0.75rem; margin: 0.5rem 0 0; }
 code { color: #cfc8c0; }
+
+.state {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0.5rem 0 0.75rem;
+  font-variant-numeric: tabular-nums;
+}

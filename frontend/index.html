@@ -3,21 +3,22 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>천상천하 · 유아독존</title>
+  <title>채티</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <div class="app">
     <header>
-      <div class="mark">獨</div>
+      <div class="mark">채</div>
       <div>
-        <h1>천상천하 · 유아독존</h1>
-        <p class="sub">PDF는 내 법. 나머지는 시시하지.</p>
+        <h1>채티</h1>
+        <p class="sub">집착 동역학 롤플레이 · 상태는 말투로만</p>
       </div>
     </header>
+    <div id="state" class="state"></div>
     <main id="log" aria-live="polite"></main>
     <form id="form">
-      <input id="input" autocomplete="off" placeholder="말해 봐. 내키면 답하지." />
+      <input id="input" autocomplete="off" placeholder="말해 봐. /state /reset /silence" />
       <button type="submit">보내기</button>
     </form>
     <p class="hint">API: <code id="apiLabel"></code></p>
