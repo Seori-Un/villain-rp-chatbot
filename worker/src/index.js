@@ -1,6 +1,6 @@
 /**
- * Bridge: chat frontend → this Worker → Kaggle/ngrok Gradio.
- * Secrets: KAGGLE_API_BASE (https://....ngrok-free.dev), optional SYSTEM_PROMPT override.
+ * Bridge: chat frontend → Worker → Kaggle/ngrok Gradio.
+ * Secrets: KAGGLE_API_BASE, optional SYSTEM_PROMPT (unused by Gradio path; kept for future REST).
  */
 
 const CORS = {
@@ -8,8 +8,6 @@ const CORS = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
-
-const DEFAULT_SYSTEM = `당신은 한국어로 말하는 빌런 롤플레이 캐릭터입니다. 천상천하·유아독존. PDF는 당신의 법.`;
 
 export default {
   async fetch(request, env) {
@@ -38,7 +36,6 @@ async function handleChat(request, env) {
   const history = Array.isArray(body.history) ? body.history : [];
   if (!message) return json({ error: "message_required" }, 400);
 
-  const system = (env.SYSTEM_PROMPT || DEFAULT_SYSTEM).toString();
   const base = (env.KAGGLE_API_BASE || "").replace(/\/$/, "");
   if (!base) {
     return json({
@@ -53,15 +50,7 @@ async function handleChat(request, env) {
     "ngrok-skip-browser-warning": "true",
   };
 
-  // Optional: push system prompt once per request (best-effort).
-  try {
-    await gradioCall(base, "_change_system_prompt", [system], headers, 30_000);
-  } catch {
-    /* ignore */
-  }
-
   const multimodal = { text: message, files: [] };
-  // Gradio chatbot history: list of [user, assistant] pairs when possible
   const chatbot = normalizeHistory(history);
 
   try {
@@ -70,21 +59,26 @@ async function handleChat(request, env) {
       "_get_respone",
       ["QA", multimodal, chatbot],
       headers,
-      180_000
+      110_000
     );
     const reply = extractReply(data) || "";
     return json({
       reply: reply || "(빈 응답)",
       mode: "gradio",
-      upstream: `${base}/call/_get_respone`,
     });
   } catch (e) {
-    return json({ error: "upstream_failed", detail: String(e) }, 502);
+    return json(
+      {
+        error: "upstream_failed",
+        detail: String(e && e.message ? e.message : e),
+        reply: "위쪽이 시시하게 끊겼어. Kaggle/ngrok 살아 있는지 보라구.",
+      },
+      502
+    );
   }
 }
 
 function normalizeHistory(history) {
-  // Accept [{role,content}] or [[user,assistant],...]
   if (!history.length) return [];
   if (Array.isArray(history[0])) return history;
   const pairs = [];
@@ -102,7 +96,6 @@ function normalizeHistory(history) {
 }
 
 function extractReply(data) {
-  // Expected: [multimodal, chatbot, status]
   if (!Array.isArray(data)) return String(data ?? "");
   const chatbot = data[1];
   if (Array.isArray(chatbot) && chatbot.length) {
@@ -127,10 +120,10 @@ async function gradioCall(base, apiName, data, headers, timeoutMs) {
   try {
     joinJson = JSON.parse(joinText);
   } catch {
-    throw new Error(`join_not_json:${join.status}:${joinText.slice(0, 200)}`);
+    throw new Error(`join_not_json:${join.status}:${joinText.slice(0, 120)}`);
   }
   if (!join.ok || !joinJson.event_id) {
-    throw new Error(`join_failed:${join.status}:${joinText.slice(0, 200)}`);
+    throw new Error(`join_failed:${join.status}:${joinText.slice(0, 120)}`);
   }
   const eid = joinJson.event_id;
   const ctrl = new AbortController();
@@ -140,6 +133,9 @@ async function gradioCall(base, apiName, data, headers, timeoutMs) {
       headers: { ...headers, Accept: "text/event-stream" },
       signal: ctrl.signal,
     });
+    if (!res.ok) {
+      throw new Error(`sse_http_${res.status}`);
+    }
     const text = await res.text();
     let lastData = null;
     for (const block of text.split("\n\n")) {
