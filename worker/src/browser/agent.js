@@ -35,6 +35,7 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
   const steps = [];
   let page = { url: "", title: "" };
   let needsConfirm = null;
+  let lastScreenshot = null; // base64 or data URL for UI (not sent to LLM)
 
   const system = browserSystemPrompt({ maxSteps });
   /** @type {{role:string, content?:string, tool_calls?:any[], tool_call_id?:string}[]} */
@@ -54,14 +55,20 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
     mode = planned.mode;
 
     if (planned.error && !planned.actions.length) {
-      return {
+      const early = {
         ok: false,
         error: planned.error,
         reply: `${n}/${maxSteps} 단계: LLM 계획 실패 — ${planned.error}`,
         steps,
         needs_confirm: null,
         mode,
+        session_id: sid,
+        browser: "configured",
       };
+      if (lastScreenshot && String(lastScreenshot).length <= 400000) {
+        early.last_screenshot = lastScreenshot;
+      }
+      return early;
     }
 
     // If model returned plain text without tools, treat as done summary
@@ -94,7 +101,7 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
             content: JSON.stringify({ ok: true }),
           });
         }
-        return finish(true, finalSummary, steps, null, mode, sid, maxSteps, n);
+        return finish(true, finalSummary, steps, null, mode, sid, maxSteps, n, undefined, lastScreenshot);
       }
 
       const safe = checkAction(act, confirm, page);
@@ -109,7 +116,7 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
         });
         if (safe.needs_confirm) {
           needsConfirm = safe.needs_confirm;
-          return finish(false, safe.message, steps, needsConfirm, mode, sid, maxSteps, n, safe.code);
+          return finish(false, safe.message, steps, needsConfirm, mode, sid, maxSteps, n, safe.code, lastScreenshot);
         }
         // feed refusal back to model and continue
         appendToolResult(messages, act, mode, planned, {
@@ -129,6 +136,9 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
 
       if (result.url) page.url = result.url;
       if (result.title) page.title = result.title;
+
+      const shot = result.screenshot_b64 || result.screenshot || result.screenshot_url;
+      if (shot && typeof shot === "string") lastScreenshot = shot;
 
       const compact = compactObservation(result);
       steps.push({
@@ -150,7 +160,8 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
           sid,
           maxSteps,
           n,
-          "browser_not_configured"
+          "browser_not_configured",
+          lastScreenshot
         );
       }
     }
@@ -161,13 +172,13 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
   if (!finalSummary) {
     finalSummary = `${maxSteps}/${maxSteps} 단계: 최대 단계에 도달했어. 지금까지 ${steps.length}개 액션 실행.`;
   }
-  return finish(true, finalSummary, steps, needsConfirm, mode, sid, maxSteps, steps.length || maxSteps);
+  return finish(true, finalSummary, steps, needsConfirm, mode, sid, maxSteps, steps.length || maxSteps, undefined, lastScreenshot);
 }
 
-function finish(ok, reply, steps, needsConfirm, mode, sid, maxSteps, n, error) {
+function finish(ok, reply, steps, needsConfirm, mode, sid, maxSteps, n, error, lastScreenshot) {
   const prefixed =
     reply && !/^\d+\s*\/\s*\d+\s*단계/.test(reply) ? `${n}/${maxSteps} 단계: ${reply}` : reply;
-  return {
+  const out = {
     ok,
     error: error || (ok ? undefined : "failed"),
     reply: prefixed,
@@ -177,6 +188,12 @@ function finish(ok, reply, steps, needsConfirm, mode, sid, maxSteps, n, error) {
     session_id: sid,
     browser: "configured",
   };
+  if (lastScreenshot) {
+    // Cap huge payloads (~400KB chars) — UI optional preview only
+    const s = String(lastScreenshot);
+    if (s.length <= 400000) out.last_screenshot = s;
+  }
+  return out;
 }
 
 function redactArgs(args) {

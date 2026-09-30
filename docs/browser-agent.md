@@ -129,7 +129,9 @@ npx wrangler secret put BROWSER_API_KEY   # runner와 동일
     { "n": 2, "tool": "done", "args": { "summary": "..." }, "ok": true }
   ],
   "needs_confirm": null,
-  "browser": "configured"
+  "browser": "configured",
+  "session_id": "…",
+  "last_screenshot": "(optional base64 or URL)"
 }
 ```
 
@@ -149,7 +151,8 @@ npx wrangler secret put BROWSER_API_KEY   # runner와 동일
 
 ## 7/n 단계 — 채티와의 관계
 
-- **v1**: `/browse`는 RP `/chat`과 **분리**. 형제 UI 또는 `?mode=browse`로 호출.
+- **v1**: `/browse`는 RP `/chat`과 **분리**. 채티 프론트 헤더 **「웹 시켜줘」** 패널에서 호출.
+- 응답에 `last_screenshot`(base64/URL, 있을 때만)을 실어 UI 미리보기 가능. LLM 컨텍스트에는 넣지 않음.
 - 집착 RP 페르소나는 브라우저 자동화에 섞지 않음 (안전·의도 혼선 방지).
 - 나중에 채티가 “대신 열어줘”라고 하면 intent → `/browse` 위임 가능 (미구현).
 
@@ -162,3 +165,4 @@ npx wrangler secret put BROWSER_API_KEY   # runner와 동일
 | browser-runner Playwright | ✅ skeleton |
 | 실클릭 | ❌ `BROWSER_API_URL` + runner/cloud 필요 |
 | 채팅 회귀 | ✅ `/chat` 독립 |
+| 채티 프론트 「웹 시켜줘」 | ✅ `frontend/` → POST `/browse` |
