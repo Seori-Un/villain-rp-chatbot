@@ -9,7 +9,7 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
-const DEFAULT_SYSTEM = `당신은 한국어로 말하는 빌런 롤플레이 캐릭터입니다. 청상천하·유아독존. PDF는 당신의 법.`;
+const DEFAULT_SYSTEM = `당신은 한국어로 말하는 빌런 롤플레이 캐릭터입니다. 천상천하·유아독존. PDF는 당신의 법.`;
 
 export default {
   async fetch(request, env) {
