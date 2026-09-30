@@ -4,3 +4,8 @@ compatibility_date = "2025-09-01"
 
 [vars]
 # Set secrets via: wrangler secret put KAGGLE_API_BASE
+
+# Optional browser agent (do not put secrets here — use wrangler secret put):
+#   BROWSER_API_URL   e.g. https://xxxx.ngrok-free.app
+#   BROWSER_API_KEY   shared with browser-runner
+# Chat works without these.

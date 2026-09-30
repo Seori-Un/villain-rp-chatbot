@@ -1,10 +1,12 @@
 /**
- * 채티 v2.2 — 집착 동역학 롤플레이
+ * 채티 v2.3 — 집착 동역학 롤플레이 + optional browser agent (/browse)
  * Secrets: GROQ_API_KEY (primary), GEMINI_API_KEY (optional fallback)
- * Upgrades: Groq Llama-replacement primary LLM, Gemini secondary, templates last
+ * Optional: BROWSER_API_URL, BROWSER_API_KEY (see docs/browser-agent.md)
+ * /chat unchanged when browser secrets missing.
  */
 
 import { classifyIntent, normalizeUtterance } from "./intent.js";
+import { handleBrowse, browserHealth } from "./browser/index.js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -26,11 +28,16 @@ export default {
       return json({
         ok: true,
         bot: "채티",
-        version: "obsession-v2.2-groq",
+        version: "obsession-v2.3-browse-scaffold",
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
         sessions: SESSIONS.size,
+        ...browserHealth(env),
       });
+    }
+    if (url.pathname === "/browse" && request.method === "POST") {
+      const out = await handleBrowse(request, env);
+      return json(out.body, out.status);
     }
     if (url.pathname === "/chat" && request.method === "POST") {
       return handleChat(request, env);
@@ -41,7 +48,7 @@ export default {
     if (url.pathname === "/reset" && request.method === "POST") {
       return handleReset(request);
     }
-    return json({ error: "not_found", try: ["/health", "POST /chat"] }, 404);
+    return json({ error: "not_found", try: ["/health", "POST /chat", "POST /browse"] }, 404);
   },
 };
 

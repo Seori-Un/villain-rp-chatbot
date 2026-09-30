@@ -12,3 +12,15 @@
 - `POST /chat` `{ "message": "...", "history": [] }`
 
 지식 PDF는 저장소 루트 `this.pdf` (Kaggle/RAG 쪽).
+
+## Browser agent (optional)
+Secrets (only needed for `/browse`):
+- `BROWSER_API_URL`
+- `BROWSER_API_KEY`
+
+API:
+- `POST /browse` `{ "goal": "example.com 열어서 제목 알려줘" }`
+- Chat RP: `POST /chat` (unchanged if browser secrets missing)
+
+See `../docs/browser-agent.md` and `../browser-runner/`.
+

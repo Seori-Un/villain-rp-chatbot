@@ -5,3 +5,7 @@ node_modules/
 *.pyc
 __pycache__/
 .env
+browser-runner/node_modules/
+browser-runner/.env
+browser-runner/screenshots/
+*.png

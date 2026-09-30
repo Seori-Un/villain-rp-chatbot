@@ -4,7 +4,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "intent-check": "node scripts/intent-check.js"
+    "intent-check": "node scripts/intent-check.js",
+    "browser-safety-check": "node scripts/browser-safety-check.js"
   },
   "devDependencies": {
     "wrangler": "^3.114.0"
