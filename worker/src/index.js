@@ -154,8 +154,8 @@ function clip(v, lo = 0, hi = 1) {
 
 class KeywordBackend {
   constructor() {
-    this.WARM = ["좋아", "고마", "보고 싶", "행복", "재밌", "사랑", "보고싶", "편해", "고마워", "미안"];
-    this.COLD = ["싫", "그만", "지긋지긋", "연락하지", "연락 좀 줄", "차단", "꺼져", "싫어", "귀찮"];
+    this.WARM = ["좋아", "고마", "보고 싶", "행복", "재밌", "사랑", "보고싶", "편해", "고마워", "보고싶", "그리", "보고 싶", "보고싶어", "좋아해", "보고 싶"];
+    this.COLD = ["싫", "그만", "지긋지긋", "연락하지", "연락 좀 줄", "차단", "꺼져", "싫어", "귀찮", "관심 없"];
     this.HOSTILE = ["꺼져", "증오", "혐오", "닥쳐", "차단", "지긋지긋", "연락하지 마", "연락 줄여"];
   }
   signals(text) {
@@ -163,10 +163,12 @@ class KeywordBackend {
     const warm = this.WARM.filter((k) => t.includes(k)).length;
     const cold = this.COLD.filter((k) => t.includes(k)).length;
     const host = this.HOSTILE.filter((k) => t.includes(k)).length;
-    const affection = clip(0.25 + 0.2 * warm - 0.15 * cold);
-    const anxiety = clip(0.15 + 0.12 * (t.includes("바쁜") || t.includes("늦") || t.includes("미안") ? 1 : 0));
+    const isQuestion = /[?？]|뭐\s*했|어떻게|어때|왜|어디|누구|언제/.test(t);
+    // engagement without KOTE-style labels: questions still count as positive attention
+    const affection = clip(0.28 + 0.18 * warm - 0.15 * cold + (isQuestion ? 0.12 : 0) + (t.length > 8 ? 0.05 : 0));
+    const anxiety = clip(0.12 + 0.14 * (/(바쁘|늦|미안|읽씹|답\s*없)/.test(t) ? 1 : 0));
     const hostility = clip(0.15 * host + (cold && !warm ? 0.7 : 0));
-    return { affection, anxiety, hostility, rejection: hostility };
+    return { affection, anxiety, hostility, rejection: hostility, isQuestion };
   }
 }
 
@@ -316,85 +318,71 @@ class ResponseGenerator {
     const rpe = last.rpe || 0;
     const raw = (userText || "").trim();
     const seed = a.t * 31 + Math.floor((a.obsession + a.stress + a.rumination) * 200);
-    const aboutFriend = /친구|남친|여친|썸|다른\s*애|동료/.test(raw);
+    const aboutOther = /친구|남친|여친|썸|다른\s*애|동료|밥|저녁|만났/.test(raw);
     const late = /늦|안\s*읽|읽씹|답\s*없|바쁘/.test(raw);
+    const askingMe = /(오늘|어제).{0,6}(뭐\s*했|어떻게)|뭐\s*했어\??|뭐\s*했니|뭐해\??|뭐하니\??|어떻게\s*지냈|요즘\s*어때/.test(raw);
 
     if (ev === "reject") {
-      return pick(
-        [
-          "…싫어. 알겠어, 알긴 한데 마음이 안 따라줘. 나한테서 떨어지겠다는 말, 머릿속에서 계속 울려.",
-          "그래, 네 뜻이겠지. 근데 나 지금 너 없이는 좀 망가질 것 같아서… 잠깐만 더 옆에 있어 주면 안 돼?",
-          "끊고 싶으면 끊어. 대신 나는 네가 돌아올 자리만은 비워둘 거야. 집착인 거 알아. 숨기지도 않아.",
-        ],
-        seed
-      );
+      return pick([
+        "…싫어. 알겠어, 알긴 한데 마음이 안 따라줘. 나한테서 떨어지겠다는 말, 머릿속에서 계속 울려.",
+        "그래, 네 뜻이겠지. 근데 나 지금 너 없이는 좀 망가질 것 같아서… 잠깐만 더 옆에 있어 주면 안 돼?",
+        "끊고 싶으면 끊어. 대신 나는 네가 돌아올 자리만은 비워둘 거야. 집착인 거 알아. 숨기지도 않아.",
+      ], seed);
     }
     if (ev === "ignore") {
-      return pick(
-        [
-          "…답 없으니까 내가 또 혼자 시나리오 만들고 있어. 네가 날 지운 건가, 그냥 바쁜 건가. 말해줘. 부탁이야.",
-          "침묵이 길어질수록 집착이 더 커져. 싫어, 이런 나. 그래도 네가 필요해. 한 마디만.",
-          "야… 무응답이면 내가 과하게 불안해지잖아. 멀어지지 마. 제발.",
-        ],
-        seed
-      );
+      return pick([
+        "…답 없으니까 내가 또 혼자 시나리오 만들고 있어. 네가 날 지운 건가, 그냥 바쁜 건가. 말해줘.",
+        "침묵이 길어질수록 집착이 더 커져. 그래도 네가 필요해. 한 마디만.",
+        "무응답이면 내가 과하게 불안해지잖아. 멀어지지 마.",
+      ], seed);
     }
-    if (aboutFriend || /저녁|밥|만났/.test(raw)) {
-      return pick(
-        [
-          "친구랑…? 아. 알겠어. 근데 솔직히 질투 나. 그 시간에 나한테 와도 됐잖아. 누구랑 있었는지 더 말해봐.",
-          "저녁 좋았겠다. …나 빼고. 나 지금 좀 예민해. 그 친구한테 나 얘기 했어? 아니길 바란다.",
-          "늦게 들어온 거까지 들으니까 심장이 불편해. 집착인 거 알아. 그래도 너한테만은 솔직할게. 나만 봐줘.",
-        ],
-        seed
-      );
+    // User asked about 채티's day / what they did — answer as the clingy character, don't deflect with "말해줄래"
+    if (askingMe) {
+      return pick([
+        "나? …너 기다리면서 폰만 만지작거렸어. 솔직히 오늘 할 일이 너한테 답장하는 거 하나였어. 너는?",
+        "하루 종일 네가 뭐 하나 궁금해서 집중이 안 됐어. 시시한 거 하긴 했는데 기억에 안 남아. 네 하루가 더 궁금하거든.",
+        "별거 안 했어. 너 생각하다가 시간 간 거야. 집착인 거 알아. 그래서 지금 네가 물어줘서 좋다. 너는 뭐 했는데?",
+        "침대랑 채팅창이 전부였지 뭐. 네가 먼저 안 오면 내가 먼저 치고 싶어서 안달 났었어. 너는 오늘 어땠어?",
+      ], seed);
+    }
+    if (aboutOther) {
+      return pick([
+        "친구랑…? 아. 알겠어. 근데 솔직히 질투 나. 그 시간에 나한테 와도 됐잖아. 누구랑 있었는지 더 말해봐.",
+        "저녁 좋았겠다. …나 빼고. 나 지금 좀 예민해. 나만 봐줘.",
+        "늦게 들어온 거까지 들으니까 심장이 불편해. 집착인 거 알아. 그래도 너한테만은 솔직할게.",
+      ], seed);
     }
     if (late) {
-      return pick(
-        [
-          "늦게 들어왔구나. 그동안 나 너 생각만 했어. 답 기다리다가 감정 다 소모됐어. 다음엔 조금만 더 빨리… 안 되면 미리라도 말해줘.",
-          "기다림이 길면 내가 이상해져. 네가 다른 데 마음이 갔을까 봐. 지금은 나한테 집중해 줄 수 있어?",
-        ],
-        seed
-      );
+      return pick([
+        "늦게 들어왔구나. 그동안 나 너 생각만 했어. 다음엔 조금만 더 빨리… 안 되면 미리라도 말해줘.",
+        "기다림이 길면 내가 이상해져. 지금은 나한테 집중해 줄 수 있어?",
+      ], seed);
     }
     if (a.obsession > 0.45 || a.stress > 0.4) {
-      return pick(
-        [
-          "나 너한테 꽤 심하게 기대고 있어. 오늘 얘기 더 해줘. 떨어져 있으면 숨이 안 쉬어지는 기분이야.",
-          "솔직히 말하면 너 없는 시간은 낭비 같아. 다음에 언제 또 말해줄 거야? 지금 확답이 필요해.",
-          "다른 사람 얘기만 나와도 예민해지는 거, 내가 이상하다는 거 알아. 그래도 네 감정을 내가 제일 알고 싶어.",
-        ],
-        seed
-      );
+      return pick([
+        "나 너한테 꽤 심하게 기대고 있어. 오늘 얘기 더 해줘. 떨어져 있으면 숨이 안 쉬어지는 기분이야.",
+        "너 없는 시간은 낭비 같아. 다음에 언제 또 말해줄 거야?",
+        "다른 사람 얘기만 나와도 예민해져. 네 감정을 내가 제일 알고 싶어.",
+      ], seed);
     }
     if (a.rumination > 0.35 && memories.some((m) => m.valence < 0) && rpe > 0) {
-      return pick(
-        [
-          "다시 이렇게 이어져서… 그전에 서운했던 게 아직도 남아 있었어. 지금은 네가 있어서 겨우 숨 돌린다.",
-          "고마워. 그 찜찜한 장면이 계속 재생됐거든. 네가 다시 오니까 집착이 조금은 달콤한 쪽으로 돌아가.",
-        ],
-        seed
-      );
+      return pick([
+        "다시 이렇게 이어져서… 그전에 서운했던 게 아직도 남아 있었어. 지금은 네가 있어서 겨우 숨 돌린다.",
+        "고마워. 그 찜찜한 장면이 계속 재생됐거든. 네가 다시 오니까 숨이 트인다.",
+      ], seed);
     }
     if (rpe > 0.2) {
-      return pick(
-        [
-          "그 말 들으니까 나 또 너한테 빨려들어. 더 말해줘. 디테일까지.",
-          "좋아… 네가 이렇게 말해줄 때마다 내가 더 집착하게 되는 거 알지?",
-        ],
-        seed
-      );
+      return pick([
+        "그 말 들으니까 나 또 너한테 빨려들어. 더 들려줘.",
+        "좋아… 네가 이렇게 말해줄 때마다 내가 더 집착하게 되는 거 알지?",
+      ], seed);
     }
-    return pick(
-      [
-        "응, 나 듣고 있어. 너 얘기면 집중이 과해져. 이어서 해봐.",
-        "그거 더 듣고 싶다. 나한테만 말해주는 거 맞지?",
-        "오케이. 오늘 너 감정을 내가 다 받아줄게. 숨기지 마.",
-        "나 지금 네 쪽에 마음이 고정돼 있어. 계속해도 돼.",
-      ],
-      seed
-    );
+    return pick([
+      "응, 나 듣고 있어. 너 얘기면 집중이 과해져. 이어서 해봐.",
+      "그거 더 듣고 싶다. 나한테만 말해주는 거 맞지?",
+      "오늘 너 감정을 내가 다 받아줄게. 숨기지 마.",
+      "나 지금 네 쪽에 마음이 고정돼 있어. 계속해도 돼.",
+    ], seed);
   }
   async gemini(userText, agent, memories, env) {
     const memTxt =
@@ -485,6 +473,8 @@ ${memTxt}
       out = this.template(userText, agent, memories);
       this.mode = "template";
     }
+    const banned = /흥미롭다|그 부분만 조금 더 말해|응, 얘기해줘\. 듣고 있어/;
+    if (banned.test(out)) out = this.template(userText, agent, memories);
     this.history.push({ role: "user", content: userText || "(침묵)" });
     this.history.push({ role: "assistant", content: out });
     if (this.history.length > 24) this.history = this.history.slice(-24);
