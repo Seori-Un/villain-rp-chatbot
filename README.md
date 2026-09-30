@@ -31,13 +31,13 @@ https://www.kaggle.com/code/seoriun/notebookf32ae7a716/edit
 
 `POST /browse` — multi-step web agent with Claude-style **「생각 중」** UI.
 Browse LLM: **Claude** (if `ANTHROPIC_API_KEY`) → **Gemini** (`GEMINI_API_KEY`) → Groq fallback.
-**`/chat` stays on Groq** for fast RP.
+**`/chat` primary LLM: Claude** (`ANTHROPIC_API_KEY`) → Gemini → Groq → template.
 
 Secrets:
 
 - `BROWSER_API_URL` / `BROWSER_API_KEY` — Playwright runner (trycloudflare / ngrok / VPS)
 - `GEMINI_API_KEY` — browse loop (recommended without Anthropic)
-- `ANTHROPIC_API_KEY` — optional, for true Claude Sonnet + extended thinking
+- `ANTHROPIC_API_KEY` — `/chat` RP primary + browse Claude Sonnet (+ extended thinking on browse)
 
 Without browser secrets, **`/chat` still works**; `/browse` returns `browser_not_configured`.
 

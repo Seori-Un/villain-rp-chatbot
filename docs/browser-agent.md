@@ -10,7 +10,7 @@
 |---------|------|------|
 | Worker `/browse` | 브라우즈 LLM 루프 + 안전 게이트 + thinking steps | `worker/src/browser/` |
 | Browse LLM | **Claude**(키 있으면) → **Gemini** → Groq 폴백 | `worker/src/browser/llm.js` |
-| RP `/chat` | **Groq 유지** — 브라우즈와 분리 | `worker/src/index.js` |
+| RP `/chat` | **Claude** → Gemini → Groq → template | `worker/src/index.js` |
 | browser-runner | 로컬/VPS Playwright HTTP 서버 | `browser-runner/` |
 | 프론트 「웹 시켜줘」 | 접이식 「생각 중」 타임라인 | `frontend/` |
 
@@ -31,9 +31,9 @@ Worker (Cloudflare Secrets):
 
 | 이름 | 필수 | 설명 |
 |------|------|------|
-| `GROQ_API_KEY` | `/chat` RP | 브라우즈 폴백만 (느리거나 불안정할 수 있음) |
+| `GROQ_API_KEY` | `/chat` 폴백 | 브라우즈·채팅 폴백 (느리거나 불안정할 수 있음) |
 | `GEMINI_API_KEY` | 브라우즈 권장 | 브라우즈 루프 기본 (Claude 키 없을 때). 쿼터 429 시 Groq로 자동 폴백 |
-| `ANTHROPIC_API_KEY` 또는 `CLAUDE_API_KEY` | 옵션 | **진짜 Claude Sonnet + extended thinking**. 없으면 Gemini로 생각 UI 시뮬레이션 |
+| `ANTHROPIC_API_KEY` 또는 `CLAUDE_API_KEY` | `/chat` 권장 · 브라우즈 옵션 | **채팅 1순위 + 브라우즈 Claude Sonnet/thinking**. 없으면 채팅은 Gemini→Groq |
 | `BROWSER_API_URL` | 브라우즈만 | 예: `https://xxxx.trycloudflare.com` |
 | `BROWSER_API_KEY` | 권장 | 러너 Bearer 토큰 |
 
@@ -118,6 +118,6 @@ npx wrangler secret put ANTHROPIC_API_KEY
 |------|------|
 | Gemini 브라우즈 + thinking UI | ✅ (ANTHROPIC 없으면) |
 | Claude 브라우즈 (키 있을 때) | ✅ 코드 준비 — secret 필요 |
-| Groq `/chat` RP | ✅ 변경 없음 |
+| Claude `/chat` RP | ✅ 1순위 (Gemini→Groq 폴백) |
 | browser-runner | ✅ |
 | 채티 「생각 중」 타임라인 | ✅ |

@@ -1,7 +1,7 @@
 /**
  * Browse-loop LLM providers.
  * Prefer: Anthropic Claude (if ANTHROPIC_API_KEY / CLAUDE_API_KEY) → Gemini → Groq.
- * /chat keeps using Groq; this module is browse-only.
+ * /chat has its own Claude→Gemini→Groq cascade in index.js; this module is browse-only.
  */
 
 import { BROWSER_TOOLS, geminiFunctionDeclarations, parseReactAction, normalizeToolCalls } from "./tools.js";

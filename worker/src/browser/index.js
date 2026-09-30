@@ -1,7 +1,7 @@
 /**
  * POST /browse handler — optional sibling to RP /chat.
  * Browse LLM: Claude (if ANTHROPIC_API_KEY) → Gemini → Groq.
- * /chat stays on Groq RP and is untouched by browse failures.
+ * /chat is separate (Claude→Gemini→Groq) and untouched by browse failures.
  */
 
 import { isBrowserConfigured } from "./safety.js";
@@ -44,7 +44,7 @@ export async function handleBrowse(request, env) {
         ok: false,
         error: "no_llm",
         reply:
-          "브라우즈용 LLM 키가 없어. GEMINI_API_KEY 또는 ANTHROPIC_API_KEY를 Worker secret으로 넣어줘. (/chat용 GROQ는 그대로 둬도 돼)",
+          "브라우즈용 LLM 키가 없어. GEMINI_API_KEY 또는 ANTHROPIC_API_KEY를 Worker secret으로 넣어줘. (/chat은 별도 캐스케이드)",
         browser: "configured",
         hint_anthropic: "wrangler secret put ANTHROPIC_API_KEY  # Claude Sonnet + extended thinking",
       },

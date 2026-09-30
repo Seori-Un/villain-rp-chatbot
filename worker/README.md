@@ -20,7 +20,7 @@ Secrets (only needed for `/browse`):
 
 API:
 - `POST /browse` `{ "goal": "example.com 열어서 제목 알려줘" }`
-- Chat RP: `POST /chat` (unchanged if browser secrets missing)
+- Chat RP: `POST /chat` — Claude → Gemini → Groq → template (works if Anthropic/Gemini/Groq secrets present; browser secrets independent)
 
 See `../docs/browser-agent.md` and `../browser-runner/`.
 

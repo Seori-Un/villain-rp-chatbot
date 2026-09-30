@@ -1,8 +1,8 @@
 /**
- * 채티 v2.4 — 집착 동역학 롤플레이 + optional browser agent (/browse)
- * Secrets: GROQ_API_KEY (RP /chat), GEMINI_API_KEY (browse + chat fallback), optional ANTHROPIC_API_KEY (browse Claude)
+ * 채티 v2.5 — 집착 동역학 롤플레이 + optional browser agent (/browse)
+ * /chat LLM: Claude (ANTHROPIC_API_KEY) → Gemini → Groq → template
+ * /browse unchanged: Claude → Gemini → Groq (see browser/llm.js)
  * Optional: BROWSER_API_URL, BROWSER_API_KEY (see docs/browser-agent.md)
- * /chat unchanged when browser secrets missing.
  */
 
 import { classifyIntent, normalizeUtterance } from "./intent.js";
@@ -28,9 +28,14 @@ export default {
       return json({
         ok: true,
         bot: "채티",
-        version: "obsession-v2.4-browse-thinking",
+        version: "obsession-v2.5-chat-claude",
+        chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
+        anthropic: Boolean(
+          (env.ANTHROPIC_API_KEY && String(env.ANTHROPIC_API_KEY).trim()) ||
+            (env.CLAUDE_API_KEY && String(env.CLAUDE_API_KEY).trim())
+        ),
         sessions: SESSIONS.size,
         ...browserHealth(env),
       });
@@ -51,6 +56,19 @@ export default {
     return json({ error: "not_found", try: ["/health", "POST /chat", "POST /browse"] }, 404);
   },
 };
+
+/** Primary planned LLM for /chat (key presence only; runtime may fall back). */
+function resolveChatLlm(env) {
+  if (
+    (env.ANTHROPIC_API_KEY && String(env.ANTHROPIC_API_KEY).trim()) ||
+    (env.CLAUDE_API_KEY && String(env.CLAUDE_API_KEY).trim())
+  ) {
+    return "claude";
+  }
+  if (env.GEMINI_API_KEY && String(env.GEMINI_API_KEY).trim()) return "gemini";
+  if (env.GROQ_API_KEY && String(env.GROQ_API_KEY).trim()) return "groq";
+  return "template";
+}
 
 async function handleChat(request, env) {
   let body;
@@ -572,6 +590,113 @@ ${memTxt}
 
 규칙: 2~6문장 한국어 반말. 반드시 intent=${intent}에 맞게 반응.`;
   }
+  anthropicKey(env) {
+    return (
+      (env.ANTHROPIC_API_KEY && String(env.ANTHROPIC_API_KEY).trim()) ||
+      (env.CLAUDE_API_KEY && String(env.CLAUDE_API_KEY).trim()) ||
+      ""
+    );
+  }
+  /** Claude Sonnet — same model list as browse (no tools / no extended thinking for RP speed). */
+  async claude(userText, agent, memories, intent, env) {
+    const apiKey = this.anthropicKey(env);
+    if (!apiKey) throw new Error("no_anthropic");
+    const sys = this.buildSystemPrompt(agent, memories, intent);
+    const messages = [];
+    for (const m of this.history.slice(-10)) {
+      const role = m.role === "assistant" ? "assistant" : "user";
+      const content = String(m.content || "");
+      if (!content) continue;
+      if (messages.length && messages[messages.length - 1].role === role) {
+        messages[messages.length - 1].content += "\n" + content;
+      } else {
+        messages.push({ role, content });
+      }
+    }
+    const userLine = `[intent=${intent}] ${userText || "(상대가 침묵했다)"}`;
+    if (messages.length && messages[messages.length - 1].role === "user") {
+      messages[messages.length - 1].content += "\n" + userLine;
+    } else {
+      messages.push({ role: "user", content: userLine });
+    }
+    // Anthropic requires first message to be user
+    if (messages.length && messages[0].role !== "user") {
+      messages.unshift({ role: "user", content: "(대화 시작)" });
+    }
+    const models = ["claude-sonnet-5", "claude-sonnet-5-5", "claude-sonnet-4-6"];
+    let lastErr = null;
+    for (const model of models) {
+      const body = {
+        model,
+        max_tokens: 500,
+        temperature: 1.0,
+        system: sys,
+        messages,
+      };
+      let res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(body),
+      });
+      let data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        let msg = `claude_${res.status}:${JSON.stringify(data).slice(0, 180)}`;
+        lastErr = new Error(msg);
+        // Some models reject temperature with certain configs — retry without
+        if (/temperature|top_p|top_k/i.test(msg) && "temperature" in body) {
+          delete body.temperature;
+          res = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": apiKey,
+              "anthropic-version": "2023-06-01",
+            },
+            body: JSON.stringify(body),
+          });
+          data = await res.json().catch(() => ({}));
+          if (res.ok) {
+            const text =
+              (Array.isArray(data?.content) ? data.content : [])
+                .filter((b) => b.type === "text")
+                .map((b) => b.text || "")
+                .join("")
+                .trim() || String(data?.content?.[0]?.text || "").trim();
+            if (text) {
+              this.lastModel = model;
+              return text;
+            }
+            lastErr = new Error("empty_claude:" + model);
+            continue;
+          }
+          msg = `claude_${res.status}:${JSON.stringify(data).slice(0, 180)}`;
+          lastErr = new Error(msg);
+        }
+        if (res.status === 404 || /does not exist|deprecat|not_found|model/i.test(msg)) {
+          continue;
+        }
+        // try next model on other errors too (quota on one id, etc.)
+        continue;
+      }
+      const text =
+        (Array.isArray(data?.content) ? data.content : [])
+          .filter((b) => b.type === "text")
+          .map((b) => b.text || "")
+          .join("")
+          .trim() || String(data?.content?.[0]?.text || "").trim();
+      if (!text) {
+        lastErr = new Error("empty_claude:" + model);
+        continue;
+      }
+      this.lastModel = model;
+      return text;
+    }
+    throw lastErr || new Error("empty_claude");
+  }
   async groq(userText, agent, memories, intent, env) {
     const sys = this.buildSystemPrompt(agent, memories, intent);
     const messages = [{ role: "system", content: sys }];
@@ -664,10 +789,12 @@ ${memTxt}
     let out;
     const banned =
       /흥미롭다|그 부분만 조금 더 말해|응, 얘기해줘\. 듣고 있어|AI라서|언어모델|도와드릴까요/;
+    let fellFrom = null; // track prior provider for *_fallback modes
+
     const tryGemini = async () => {
       try {
         out = await this.gemini(userText, agent, memories, intent, env);
-        this.mode = this.mode === "groq" ? "gemini_fallback" : "gemini";
+        this.mode = fellFrom ? "gemini_fallback" : "gemini";
         this.lastError = null;
         return true;
       } catch (e1) {
@@ -677,7 +804,7 @@ ${memTxt}
           try {
             await new Promise((r) => setTimeout(r, 400));
             out = await this.gemini(userText, agent, memories, intent, env);
-            this.mode = this.mode === "groq" ? "gemini_fallback" : "gemini";
+            this.mode = fellFrom ? "gemini_fallback" : "gemini";
             this.lastError = null;
             return true;
           } catch (e2) {
@@ -690,22 +817,41 @@ ${memTxt}
       }
     };
 
-    let usedLlm = false;
-    if (env.GROQ_API_KEY) {
+    const tryGroq = async () => {
+      if (!env.GROQ_API_KEY) return false;
       try {
         out = await this.groq(userText, agent, memories, intent, env);
-        this.mode = "groq";
+        this.mode = fellFrom ? "groq_fallback" : "groq";
         this.lastError = null;
-        usedLlm = true;
+        return true;
       } catch (eG) {
         this.lastError = String(eG && eG.message ? eG.message : eG).slice(0, 240);
-        if (env.GEMINI_API_KEY) {
-          usedLlm = await tryGemini();
-          if (usedLlm && this.mode === "gemini") this.mode = "gemini_fallback";
-        }
+        return false;
+      }
+    };
+
+    let usedLlm = false;
+    const hasClaude = Boolean(this.anthropicKey(env));
+    if (hasClaude) {
+      try {
+        out = await this.claude(userText, agent, memories, intent, env);
+        this.mode = "claude";
+        this.lastError = null;
+        usedLlm = true;
+      } catch (eC) {
+        this.lastError = String(eC && eC.message ? eC.message : eC).slice(0, 240);
+        fellFrom = "claude";
+        if (env.GEMINI_API_KEY) usedLlm = await tryGemini();
+        if (!usedLlm) usedLlm = await tryGroq();
       }
     } else if (env.GEMINI_API_KEY) {
       usedLlm = await tryGemini();
+      if (!usedLlm) {
+        fellFrom = "gemini";
+        usedLlm = await tryGroq();
+      }
+    } else {
+      usedLlm = await tryGroq();
     }
 
     if (!usedLlm) {
@@ -714,7 +860,13 @@ ${memTxt}
     }
     if (banned.test(out || "")) {
       out = this.template(userText, agent, intent);
-      if (this.mode === "gemini" || this.mode === "groq" || this.mode === "gemini_fallback") {
+      if (
+        this.mode === "claude" ||
+        this.mode === "gemini" ||
+        this.mode === "groq" ||
+        this.mode === "gemini_fallback" ||
+        this.mode === "groq_fallback"
+      ) {
         this.mode = "template_fallback";
       }
     }
