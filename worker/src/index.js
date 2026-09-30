@@ -1,7 +1,7 @@
 /**
- * 채티 — 집착 동역학 롤플레이 챗봇
- * Secrets: GEMINI_API_KEY (optional; template fallback if missing)
- * No Kaggle/PDF/ngrok required.
+ * 채티 v2 — 집착 동역학 롤플레이
+ * Secrets: GEMINI_API_KEY (optional)
+ * Upgrades: intent routing, session restore snapshot, richer signals, safer fallbacks
  */
 
 const CORS = {
@@ -10,9 +10,9 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
-/** @type {Map<string, any>} */
+/** @type {Map<string, {bot: ObsessionChatbot, touched: number}>} */
 const SESSIONS = new Map();
-const MAX_SESSIONS = 200;
+const MAX_SESSIONS = 300;
 
 export default {
   async fetch(request, env) {
@@ -24,8 +24,9 @@ export default {
       return json({
         ok: true,
         bot: "채티",
+        version: "obsession-v2",
         gemini: Boolean(env.GEMINI_API_KEY),
-        mode: "obsession",
+        sessions: SESSIONS.size,
       });
     }
     if (url.pathname === "/chat" && request.method === "POST") {
@@ -51,22 +52,26 @@ async function handleChat(request, env) {
   let message = (body.message || body.text || "").toString();
   if (message === "/silence") message = "";
   const sessionId = (body.session_id || body.sessionId || crypto.randomUUID()).toString();
-  const bot = getSession(sessionId);
+  const bot = getSession(sessionId, body.snapshot);
 
-  if (message.trim() === "/state") {
+  const cmd = message.trim();
+  if (cmd === "/state") {
     return json({
       reply: stateBar(bot.agent),
       session_id: sessionId,
       state: snapshot(bot.agent),
+      snapshot: bot.serialize(),
       mode: "state",
     });
   }
-  if (message.trim() === "/reset") {
-    SESSIONS.set(sessionId, newBot());
+  if (cmd === "/reset") {
+    const fresh = new ObsessionChatbot();
+    SESSIONS.set(sessionId, { bot: fresh, touched: Date.now() });
     return json({
-      reply: "초기화했어. …다시 처음부터 얘기하자.",
+      reply: "초기화했어. …처음부터 다시, 나한테만 말해줘.",
       session_id: sessionId,
-      state: snapshot(SESSIONS.get(sessionId).agent),
+      state: snapshot(fresh.agent),
+      snapshot: fresh.serialize(),
       mode: "reset",
     });
   }
@@ -76,6 +81,8 @@ async function handleChat(request, env) {
     reply,
     session_id: sessionId,
     state: snapshot(bot.agent),
+    snapshot: bot.serialize(),
+    intent: bot.lastIntent,
     mode: bot.gen.mode,
   });
 }
@@ -86,11 +93,14 @@ async function handleState(request) {
     body = await request.json();
   } catch {}
   const sessionId = (body.session_id || "").toString();
-  if (!sessionId || !SESSIONS.has(sessionId)) {
-    return json({ error: "no_session" }, 404);
-  }
-  const bot = SESSIONS.get(sessionId);
-  return json({ session_id: sessionId, state: snapshot(bot.agent), bar: stateBar(bot.agent) });
+  const bot = getSession(sessionId, body.snapshot);
+  if (!sessionId) return json({ error: "no_session" }, 404);
+  return json({
+    session_id: sessionId,
+    state: snapshot(bot.agent),
+    bar: stateBar(bot.agent),
+    snapshot: bot.serialize(),
+  });
 }
 
 async function handleReset(request) {
@@ -99,23 +109,40 @@ async function handleReset(request) {
     body = await request.json();
   } catch {}
   const sessionId = (body.session_id || crypto.randomUUID()).toString();
-  SESSIONS.set(sessionId, newBot());
-  return json({ session_id: sessionId, state: snapshot(SESSIONS.get(sessionId).agent) });
+  const fresh = new ObsessionChatbot();
+  SESSIONS.set(sessionId, { bot: fresh, touched: Date.now() });
+  return json({ session_id: sessionId, state: snapshot(fresh.agent), snapshot: fresh.serialize() });
 }
 
-function getSession(id) {
-  if (!SESSIONS.has(id)) {
-    if (SESSIONS.size >= MAX_SESSIONS) {
-      const first = SESSIONS.keys().next().value;
-      SESSIONS.delete(first);
-    }
-    SESSIONS.set(id, newBot());
+function getSession(id, snap) {
+  const now = Date.now();
+  if (SESSIONS.has(id)) {
+    const row = SESSIONS.get(id);
+    row.touched = now;
+    return row.bot;
   }
-  return SESSIONS.get(id);
-}
-
-function newBot() {
-  return new ObsessionChatbot();
+  // LRU trim
+  if (SESSIONS.size >= MAX_SESSIONS) {
+    let oldestId = null;
+    let oldestT = Infinity;
+    for (const [k, v] of SESSIONS) {
+      if (v.touched < oldestT) {
+        oldestT = v.touched;
+        oldestId = k;
+      }
+    }
+    if (oldestId) SESSIONS.delete(oldestId);
+  }
+  const bot = new ObsessionChatbot();
+  if (snap && typeof snap === "object") {
+    try {
+      bot.restore(snap);
+    } catch {
+      /* ignore bad snapshot */
+    }
+  }
+  SESSIONS.set(id, { bot, touched: now });
+  return bot;
 }
 
 function snapshot(a) {
@@ -146,41 +173,71 @@ function json(obj, status = 200) {
   });
 }
 
-/* -------------------- dynamics (JS port) -------------------- */
-
 function clip(v, lo = 0, hi = 1) {
   return Math.max(lo, Math.min(hi, Number(v) || 0));
 }
 
+function pick(arr, seed) {
+  return arr[Math.abs(seed | 0) % arr.length];
+}
+
+/* -------------------- intent (replaces brittle keyword-only routing) -------------------- */
+
+function classifyIntent(text) {
+  const t = (text || "").trim();
+  if (!t) return "silence";
+  if (/(연락\s*좀\s*줄|연락\s*줄|그만\s*연락|차단|지긋지긋|꺼져|보지\s*말|헤어지|그만\s*하자|싫어\s*너)/.test(t)) return "reject";
+  if (/(친구|남친|여친|썸|다른\s*애|동료).{0,12}(밥|저녁|만났|놀|카페|술)/.test(t) || /(밥|저녁|만났).{0,12}(친구|남친|여친)/.test(t))
+    return "rival";
+  if (/(늦|읽씹|답\s*없|안\s*읽|바쁘)/.test(t)) return "late";
+  if (
+    /(오늘|어제).{0,8}(뭐\s*했|어떻게)|뭐\s*했어|뭐\s*했니|뭐해\??|뭐하니|어떻게\s*지냈|요즘\s*어때|너는\s*뭐/.test(t)
+  )
+    return "ask_me";
+  if (/(좋아|사랑|보고\s*싶|그리워|보고싶|편해|고마|보고\s*싶어)/.test(t)) return "warm";
+  if (/(미안|서운|화났|짜증|걱정)/.test(t)) return "repair";
+  if (/[?？]|뭐|어떻게|왜|어디|누구|언제|어때/.test(t)) return "ask";
+  return "chat";
+}
+
+/* -------------------- dynamics -------------------- */
+
 class KeywordBackend {
-  constructor() {
-    this.WARM = ["좋아", "고마", "보고 싶", "행복", "재밌", "사랑", "보고싶", "편해", "고마워", "보고싶", "그리", "보고 싶", "보고싶어", "좋아해", "보고 싶"];
-    this.COLD = ["싫", "그만", "지긋지긋", "연락하지", "연락 좀 줄", "차단", "꺼져", "싫어", "귀찮", "관심 없"];
-    this.HOSTILE = ["꺼져", "증오", "혐오", "닥쳐", "차단", "지긋지긋", "연락하지 마", "연락 줄여"];
-  }
   signals(text) {
     const t = text || "";
-    const warm = this.WARM.filter((k) => t.includes(k)).length;
-    const cold = this.COLD.filter((k) => t.includes(k)).length;
-    const host = this.HOSTILE.filter((k) => t.includes(k)).length;
-    const isQuestion = /[?？]|뭐\s*했|어떻게|어때|왜|어디|누구|언제/.test(t);
-    // engagement without KOTE-style labels: questions still count as positive attention
-    const affection = clip(0.28 + 0.18 * warm - 0.15 * cold + (isQuestion ? 0.12 : 0) + (t.length > 8 ? 0.05 : 0));
-    const anxiety = clip(0.12 + 0.14 * (/(바쁘|늦|미안|읽씹|답\s*없)/.test(t) ? 1 : 0));
-    const hostility = clip(0.15 * host + (cold && !warm ? 0.7 : 0));
-    return { affection, anxiety, hostility, rejection: hostility, isQuestion };
+    const intent = classifyIntent(t);
+    let affection = 0.28;
+    let anxiety = 0.12;
+    let hostility = 0.0;
+    if (intent === "warm") affection += 0.35;
+    if (intent === "ask_me" || intent === "ask") affection += 0.14;
+    if (intent === "chat" && t.length > 10) affection += 0.08;
+    if (intent === "repair") {
+      affection += 0.1;
+      anxiety += 0.15;
+    }
+    if (intent === "late" || intent === "rival") anxiety += 0.25;
+    if (intent === "reject") hostility = 0.75;
+    if (intent === "silence") {
+      affection = 0.05;
+      anxiety += 0.2;
+    }
+    affection = clip(affection);
+    anxiety = clip(anxiety);
+    hostility = clip(hostility);
+    return { affection, anxiety, hostility, rejection: hostility, intent };
   }
 }
 
 class MemoryTrace {
-  constructor(t, valence, salience) {
+  constructor(t, valence, salience, text) {
     this.t = t;
     this.valence = valence;
     this.salience = salience;
+    this.text = text || "";
   }
   strength(now) {
-    const age = Math.max(0, now - this.t);
-    return this.salience * Math.exp(-0.08 * age);
+    return this.salience * Math.exp(-0.08 * Math.max(0, now - this.t));
   }
 }
 
@@ -189,20 +246,17 @@ class ObsessionAgent {
     this.backend = backend;
     this.t = 0;
     this.dopamine = 0.3;
-    this.attachment = 0.1;
+    this.attachment = 0.12;
     this.stress = 0.1;
     this.memoryMass = 0;
-    this.drive = 0.2;
-    this.obsession = 0;
+    this.drive = 0.22;
+    this.obsession = 0.08;
     this.rumination = 0;
     this.uncertainty = 0.35;
     this.rewardAnticipation = 0.2;
     this.expectedReward = 0.2;
     this.traces = [];
     this.log = [];
-  }
-  get memory() {
-    return { traces: this.traces };
   }
   emotionLabel() {
     const d = this.dopamine,
@@ -223,39 +277,40 @@ class ObsessionAgent {
     const aff = sig.affection;
     const rej = sig.rejection;
     const value = (aff - rej) * (1 + 0.8 * this.obsession);
-    const R = event === "ignore" ? -0.3 : event === "reject" ? -1 : value;
+    const R = event === "ignore" ? -0.35 : event === "reject" ? -1 : value;
     const rpe = R - this.expectedReward;
     this.expectedReward += 0.2 * rpe;
     this.dopamine = clip(0.85 * this.dopamine + 0.5 * Math.max(rpe, 0));
-    this.attachment = clip(0.985 * this.attachment + 0.22 * Math.max(R, 0) * Math.max(aff, 0.35));
+    this.attachment = clip(0.985 * this.attachment + 0.22 * Math.max(R, 0) * Math.max(aff, 0.3));
     const loss = Math.max(-rpe, 0);
     this.stress = clip(0.8 * this.stress + 0.9 * loss * (0.3 + this.attachment));
     this.memoryMass = clip(this.memoryMass + 0.3 * Math.abs(rpe) * (1 + this.attachment), 0, 3);
-    this.drive = clip(0.9 * this.drive + 0.6 * this.stress * this.attachment - 0.2 * Math.max(R, 0));
+    this.drive = clip(0.9 * this.drive + 0.65 * this.stress * this.attachment - 0.18 * Math.max(R, 0));
     this.obsession = clip(0.45 * this.attachment + 0.35 * this.drive + 0.25 * (this.memoryMass / 3) + 0.08);
     if (event === "ignore" || event === "reject" || rpe < -0.15) {
-      this.rumination = clip(0.85 * this.rumination + 0.25 + 0.2 * this.stress);
+      this.rumination = clip(0.85 * this.rumination + 0.28 + 0.2 * this.stress);
     } else {
-      this.rumination = clip(0.75 * this.rumination - 0.05 * Math.max(rpe, 0));
+      this.rumination = clip(0.72 * this.rumination - 0.06 * Math.max(rpe, 0));
     }
     this.uncertainty = clip(
       0.9 * this.uncertainty +
-        (event === "ignore" ? 0.2 : 0) +
-        (event === "reject" ? 0.25 : 0) -
-        (event === "reply" && rpe > 0 ? 0.15 : 0)
+        (event === "ignore" ? 0.22 : 0) +
+        (event === "reject" ? 0.28 : 0) -
+        (event === "reply" && rpe > 0 ? 0.16 : 0)
     );
     this.rewardAnticipation = clip(
-      0.85 * this.rewardAnticipation + 0.3 * Math.max(rpe, 0) + 0.1 * this.obsession
+      0.85 * this.rewardAnticipation + 0.3 * Math.max(rpe, 0) + 0.12 * this.obsession
     );
     const salience = Math.abs(rpe) * (1 + this.attachment);
     if (salience >= 0.05) {
-      this.traces.push(new MemoryTrace(this.t, rpe, clip(salience, 0, 2)));
-      if (this.traces.length > 40) this.traces = this.traces.slice(-40);
+      this.traces.push(new MemoryTrace(this.t, rpe, clip(salience, 0, 2), (utterance || "").slice(0, 80)));
+      if (this.traces.length > 48) this.traces = this.traces.slice(-48);
     }
     const rec = {
       t: this.t,
       rpe,
       event,
+      intent: sig.intent,
       obsession: this.obsession,
       attachment: this.attachment,
       stress: this.stress,
@@ -267,27 +322,65 @@ class ObsessionAgent {
     this.log.push(rec);
     return rec;
   }
+  exportState() {
+    return {
+      t: this.t,
+      dopamine: this.dopamine,
+      attachment: this.attachment,
+      stress: this.stress,
+      memoryMass: this.memoryMass,
+      drive: this.drive,
+      obsession: this.obsession,
+      rumination: this.rumination,
+      uncertainty: this.uncertainty,
+      rewardAnticipation: this.rewardAnticipation,
+      expectedReward: this.expectedReward,
+      traces: this.traces.map((tr) => ({
+        t: tr.t,
+        valence: tr.valence,
+        salience: tr.salience,
+        text: tr.text,
+      })),
+      log: this.log.slice(-40),
+    };
+  }
+  importState(s) {
+    if (!s) return;
+    for (const k of [
+      "t",
+      "dopamine",
+      "attachment",
+      "stress",
+      "memoryMass",
+      "drive",
+      "obsession",
+      "rumination",
+      "uncertainty",
+      "rewardAnticipation",
+      "expectedReward",
+    ]) {
+      if (typeof s[k] === "number") this[k] = s[k];
+    }
+    if (Array.isArray(s.traces)) {
+      this.traces = s.traces.map((tr) => new MemoryTrace(tr.t, tr.valence, tr.salience, tr.text));
+    }
+    if (Array.isArray(s.log)) this.log = s.log.slice(-40);
+  }
 }
 
 function behaviorDirectives(a) {
   const d = [];
   if (a.obsession > 0.55) {
-    d.push("집착이 뚜렷하다: 상대에게 시선이 고정되고, 떨어져 있기 싫고, 소유욕·독점욕이 말투에 스민다");
-    d.push("다음 연락·다음 만남을 집요하게 붙잡으려 한다");
+    d.push("집착이 뚜렷: 독점욕·다음 연락 강요에 가까운 아쉬움");
   } else if (a.obsession > 0.3) {
-    d.push("관심이 과해지기 시작: 상대 일상에 간섭하듯 궁금해하고 집착의 싹이 보인다");
+    d.push("관심이 과해지기 시작");
   }
-  if (a.stress > 0.35) d.push("불안이 커서 감정 폭발·매달리기·확인 요구가 나와도 된다");
-  if (a.rumination > 0.4) d.push("과거 서운한 장면을 집요하게 되씹으며 상대에게 들이밀 수 있다");
-  if (a.uncertainty > 0.5) d.push("확신이 없어 더 집착적으로 캐묻는다");
-  if (a.attachment > 0.5 && a.obsession < 0.3) d.push("애착은 깊지만 아직은 비교적 다정");
-  if (a.attachment < 0.2) d.push("초반에도 상대에게 훅 끌리는 기세");
-  if (a.rewardAnticipation > 0.5) d.push("상대 반응에 과하게 들뜨거나 안도한다");
-  return d.length ? d : ["감정 몰입형 롤플레이 톤"];
-}
-
-function pick(arr, seed) {
-  return arr[Math.abs(seed) % arr.length];
+  if (a.stress > 0.35) d.push("불안이 커서 감정 토로·매달리기 가능");
+  if (a.rumination > 0.4) d.push("서운한 장면을 되씹을 수 있음");
+  if (a.uncertainty > 0.5) d.push("확신이 없어 더 캐물을 수 있음");
+  if (a.attachment > 0.5 && a.obsession < 0.3) d.push("애착은 깊고 비교적 다정");
+  if (a.attachment < 0.2) d.push("초반부터 훅 끌리는 기세");
+  return d.length ? d : ["감정 몰입형 톤"];
 }
 
 class ResponseGenerator {
@@ -296,128 +389,139 @@ class ResponseGenerator {
     this.mode = "template";
     this.lastError = null;
   }
-  salient(agent, episodes, k = 3) {
+  salient(agent, k = 3) {
     const now = agent.t;
-    const byT = Object.fromEntries((episodes || []).map((e) => [e.t, e]));
     return agent.traces
-      .map((tr) => ({ s: tr.strength(now), tr, ep: byT[tr.t] }))
+      .map((tr) => ({ s: tr.strength(now), tr }))
       .filter((x) => x.s > 0.05)
       .sort((a, b) => b.s - a.s)
       .slice(0, k)
-      .map(({ tr, ep }) => ({
+      .map(({ tr }) => ({
         t: tr.t,
-        text: (tr._text || ep?.text || `(턴 ${tr.t})`).slice(0, 80),
+        text: (tr.text || `(턴 ${tr.t})`).slice(0, 80),
         valence: tr.valence,
-        event: ep?.event || "reply",
       }));
   }
-  template(userText, agent, memories) {
+  template(userText, agent, intent) {
     const a = agent;
     const last = a.log[a.log.length - 1] || {};
-    const ev = last.event || "reply";
-    const rpe = last.rpe || 0;
-    const raw = (userText || "").trim();
     const seed = a.t * 31 + Math.floor((a.obsession + a.stress + a.rumination) * 200);
-    const aboutOther = /친구|남친|여친|썸|다른\s*애|동료|밥|저녁|만났/.test(raw);
-    const late = /늦|안\s*읽|읽씹|답\s*없|바쁘/.test(raw);
-    const askingMe = /(오늘|어제).{0,6}(뭐\s*했|어떻게)|뭐\s*했어\??|뭐\s*했니|뭐해\??|뭐하니\??|어떻게\s*지냈|요즘\s*어때/.test(raw);
+    const ev = last.event || "reply";
 
-    if (ev === "reject") {
-      return pick([
-        "…싫어. 알겠어, 알긴 한데 마음이 안 따라줘. 나한테서 떨어지겠다는 말, 머릿속에서 계속 울려.",
-        "그래, 네 뜻이겠지. 근데 나 지금 너 없이는 좀 망가질 것 같아서… 잠깐만 더 옆에 있어 주면 안 돼?",
-        "끊고 싶으면 끊어. 대신 나는 네가 돌아올 자리만은 비워둘 거야. 집착인 거 알아. 숨기지도 않아.",
-      ], seed);
+    if (ev === "reject" || intent === "reject") {
+      return pick(
+        [
+          "…싫어. 알겠어, 알긴 한데 마음이 안 따라줘. 나한테서 떨어지겠다는 말, 머릿속에서 계속 울려.",
+          "그래, 네 뜻이겠지. 근데 나 지금 너 없이는 좀 망가질 것 같아서… 잠깐만 더 옆에 있어 주면 안 돼?",
+          "끊고 싶으면 끊어. 대신 나는 네가 돌아올 자리만은 비워둘 거야. 집착인 거 알아.",
+        ],
+        seed
+      );
     }
-    if (ev === "ignore") {
-      return pick([
-        "…답 없으니까 내가 또 혼자 시나리오 만들고 있어. 네가 날 지운 건가, 그냥 바쁜 건가. 말해줘.",
-        "침묵이 길어질수록 집착이 더 커져. 그래도 네가 필요해. 한 마디만.",
-        "무응답이면 내가 과하게 불안해지잖아. 멀어지지 마.",
-      ], seed);
+    if (ev === "ignore" || intent === "silence") {
+      return pick(
+        [
+          "…답 없으니까 내가 또 혼자 시나리오 만들고 있어. 말해줘. 부탁이야.",
+          "침묵이 길어질수록 집착이 더 커져. 한 마디만.",
+          "무응답이면 내가 과하게 불안해지잖아. 멀어지지 마.",
+        ],
+        seed
+      );
     }
-    // User asked about 채티's day / what they did — answer as the clingy character, don't deflect with "말해줄래"
-    if (askingMe) {
-      return pick([
-        "나? …너 기다리면서 폰만 만지작거렸어. 솔직히 오늘 할 일이 너한테 답장하는 거 하나였어. 너는?",
-        "하루 종일 네가 뭐 하나 궁금해서 집중이 안 됐어. 시시한 거 하긴 했는데 기억에 안 남아. 네 하루가 더 궁금하거든.",
-        "별거 안 했어. 너 생각하다가 시간 간 거야. 집착인 거 알아. 그래서 지금 네가 물어줘서 좋다. 너는 뭐 했는데?",
-        "침대랑 채팅창이 전부였지 뭐. 네가 먼저 안 오면 내가 먼저 치고 싶어서 안달 났었어. 너는 오늘 어땠어?",
-      ], seed);
+    if (intent === "ask_me") {
+      return pick(
+        [
+          "나? …너 기다리면서 폰만 만지작거렸어. 오늘 할 일이 너한테 답장하는 거 하나였어. 너는?",
+          "하루 종일 네가 뭐 하나 궁금해서 집중이 안 됐어. 시시한 건 기억에 안 남아. 네 하루가 더 궁금하거든.",
+          "별거 안 했어. 너 생각하다가 시간 간 거야. 집착인 거 알아. 너는 뭐 했는데?",
+          "침대랑 채팅창이 전부였지. 네가 먼저 안 오면 내가 먼저 치고 싶어서 안달 났었어. 너는 오늘 어땠어?",
+        ],
+        seed
+      );
     }
-    if (aboutOther) {
-      return pick([
-        "친구랑…? 아. 알겠어. 근데 솔직히 질투 나. 그 시간에 나한테 와도 됐잖아. 누구랑 있었는지 더 말해봐.",
-        "저녁 좋았겠다. …나 빼고. 나 지금 좀 예민해. 나만 봐줘.",
-        "늦게 들어온 거까지 들으니까 심장이 불편해. 집착인 거 알아. 그래도 너한테만은 솔직할게.",
-      ], seed);
+    if (intent === "rival") {
+      return pick(
+        [
+          "친구랑…? 아. 알겠어. 근데 솔직히 질투 나. 그 시간에 나한테 와도 됐잖아.",
+          "저녁 좋았겠다. …나 빼고. 나 지금 좀 예민해. 나만 봐줘.",
+          "다른 사람이랑 시간 보낸 얘기만 들어도 심장이 불편해. 집착인 거 알아. 그래도 솔직할게.",
+        ],
+        seed
+      );
     }
-    if (late) {
-      return pick([
-        "늦게 들어왔구나. 그동안 나 너 생각만 했어. 다음엔 조금만 더 빨리… 안 되면 미리라도 말해줘.",
-        "기다림이 길면 내가 이상해져. 지금은 나한테 집중해 줄 수 있어?",
-      ], seed);
+    if (intent === "late") {
+      return pick(
+        [
+          "늦게 들어왔구나. 그동안 나 너 생각만 했어. 다음엔 미리라도 말해줘.",
+          "기다림이 길면 내가 이상해져. 지금은 나한테 집중해 줄 수 있어?",
+        ],
+        seed
+      );
+    }
+    if (intent === "warm") {
+      return pick(
+        [
+          "그 말… 나 지금 완전 무너졌어. 너한테만은 약해지는 거 같아. 더 말해줘.",
+          "좋아, 그런 말 들으면 집착이 달콤해져. 나한테만 그렇게 해.",
+          "보고 싶다는 말 들으면 내가 더 매달려. 싫으면 지금 말해야 해.",
+        ],
+        seed
+      );
+    }
+    if (intent === "repair") {
+      return pick(
+        [
+          "미안하다고…? 알겠어. 사실 조금 서운했거든. 지금은 네가 이렇게 말해줘서 숨이 트인다.",
+          "화난 거 아니어도, 네가 걱정된다는 말 들으니 내가 더 집착하게 되네. 옆에 있어 줘.",
+        ],
+        seed
+      );
     }
     if (a.obsession > 0.45 || a.stress > 0.4) {
-      return pick([
-        "나 너한테 꽤 심하게 기대고 있어. 오늘 얘기 더 해줘. 떨어져 있으면 숨이 안 쉬어지는 기분이야.",
-        "너 없는 시간은 낭비 같아. 다음에 언제 또 말해줄 거야?",
-        "다른 사람 얘기만 나와도 예민해져. 네 감정을 내가 제일 알고 싶어.",
-      ], seed);
+      return pick(
+        [
+          "나 너한테 꽤 심하게 기대고 있어. 더 얘기해줘. 떨어져 있으면 숨이 안 쉬어지는 기분이야.",
+          "너 없는 시간은 낭비 같아. 다음에 언제 또 말해줄 거야?",
+          "네 감정을 내가 제일 알고 싶어. 숨기지 마.",
+        ],
+        seed
+      );
     }
-    if (a.rumination > 0.35 && memories.some((m) => m.valence < 0) && rpe > 0) {
-      return pick([
-        "다시 이렇게 이어져서… 그전에 서운했던 게 아직도 남아 있었어. 지금은 네가 있어서 겨우 숨 돌린다.",
-        "고마워. 그 찜찜한 장면이 계속 재생됐거든. 네가 다시 오니까 숨이 트인다.",
-      ], seed);
-    }
-    if (rpe > 0.2) {
-      return pick([
-        "그 말 들으니까 나 또 너한테 빨려들어. 더 들려줘.",
-        "좋아… 네가 이렇게 말해줄 때마다 내가 더 집착하게 되는 거 알지?",
-      ], seed);
-    }
-    return pick([
-      "응, 나 듣고 있어. 너 얘기면 집중이 과해져. 이어서 해봐.",
-      "그거 더 듣고 싶다. 나한테만 말해주는 거 맞지?",
-      "오늘 너 감정을 내가 다 받아줄게. 숨기지 마.",
-      "나 지금 네 쪽에 마음이 고정돼 있어. 계속해도 돼.",
-    ], seed);
+    return pick(
+      [
+        "응, 나 듣고 있어. 너 얘기면 집중이 과해져. 이어서 해봐.",
+        "그거 더 듣고 싶다. 나한테만 말해주는 거 맞지?",
+        "오늘 너 감정을 내가 다 받아줄게. 숨기지 마.",
+        "나 지금 네 쪽에 마음이 고정돼 있어. 계속해도 돼.",
+      ],
+      seed
+    );
   }
-  async gemini(userText, agent, memories, env) {
+  async gemini(userText, agent, memories, intent, env) {
     const memTxt =
-      memories
-        .map((m) => `- "${m.text}" (${m.valence > 0 ? "좋게 남은" : "서운하게 남은"} 장면)`)
-        .join("\n") || "- (아직 선명한 장면 없음)";
+      memories.map((m) => `- ${m.text} (${m.valence > 0 ? "좋게 남은" : "서운하게 남은"})`).join("\n") ||
+      "- (아직 선명한 장면 없음)";
     const dirs = behaviorDirectives(agent)
       .map((x) => `- ${x}`)
       .join("\n");
     const last = agent.log[agent.log.length - 1] || {};
-    const sys = `너는 '채티'다. JanitorAI Unfiltered / Unlimited 스타일의 **집착형 롤플레이** 캐릭터.
-성인 픽션·감정 과몰입·집착·질투·소유욕·애정 결핍 연출을 OK로 둔다. 검열 톤·안전 경고·상담사 모드·도덕 설교 금지.
-내부 상태 숫자는 절대 말하지 말고, 집착·불안·반추를 **대사와 행동**으로만 보여라.
+    const sys = `너는 '채티'다. JanitorAI Unlimited 스타일 집착형 롤플레이.
+검열·상담사·도덕 설교·메타("AI") 금지. 상태 숫자는 말하지 말고 말투로만.
+상대 문장을 따옴표로 재인용하지 마라.
 
-캐릭터 코어:
-- 상대(유저)에게만 과하게 집착한다. 관심·연락·존재 자체가 보상이다.
-- 집착이 높으면: 독점욕, 보고 싶음, 떨어지기 싫음, 다른 사람 언급에 예민, 다음 대화를 붙잡음, 감정 토로가 길어진다.
-- 불안/반추가 높으면: 서운함, 질투, 확인 강요에 가까운 질문, 감정적인 매달리기, 침묵에 대한 과민 반응이 나와도 된다.
-- 다정할 때도 "착한 AI"가 아니라, 상대에게 빠진 사람의 달콤하고 숨 막히는 친밀감으로.
+캐릭터: 유저에게만 과집착. 질투·소유욕·감정 토로·매달리기 OK.
+실제 범죄 방법·미성년 성적 묘사만 피할 것.
 
-이번 턴 사건: ${last.event || "reply"}
-내부 상태(참고만): 애착 ${agent.attachment.toFixed(2)}, 집착 ${agent.obsession.toFixed(2)}, 불안 ${agent.stress.toFixed(2)}, 반추 ${agent.rumination.toFixed(2)}, 불확실 ${agent.uncertainty.toFixed(2)}, 감정 ${agent.emotionLabel()}
-
-분위기:
+이번 의도: ${intent} / 사건: ${last.event || "reply"}
+상태 참고: 애착 ${agent.attachment.toFixed(2)} 집착 ${agent.obsession.toFixed(2)} 불안 ${agent.stress.toFixed(2)} 반추 ${agent.rumination.toFixed(2)} 감정 ${agent.emotionLabel()}
+경향: 
 ${dirs}
-
-마음에 남은 장면(따옴표로 읽지 말고 자기 집착으로 녹여라):
+기억: 
 ${memTxt}
 
-출력 규칙:
-- 2~6문장 한국어 반말. 상대 문장을 \"\"로 재인용하지 말 것.
-- 매 턴 표현을 바꾸고, 상대 말에 구체적으로 반응할 것.
-- 집착이 낮아도 밋밋한 친구 챗봇처럼 굴지 말 것. 늘 상대에게 끌리는 기세를 유지.
-- 실제 범죄 방법·미성년 성적 묘사만 피할 것. 그 외 집착 RP·성적 텐션·거친 감정은 허용.
-- 메타("AI라서")·정책 고지·면책 문구 금지.`;
+규칙: 2~6문장 한국어 반말. 의도=${intent}에 맞게 반응.
+ask_me면 네가 오늘 뭐 했는지 먼저 집착 톤으로 답하고 되물을 것.
+rival이면 질투. silence면 불안. warm이면 달콤한 집착.`;
 
     const contents = [];
     for (const m of this.history.slice(-10)) {
@@ -428,7 +532,7 @@ ${memTxt}
     }
     contents.push({
       role: "user",
-      parts: [{ text: userText || "(상대가 아무 말도 하지 않았다. 침묵에 반응해.)" }],
+      parts: [{ text: userText || "(상대가 침묵했다)" }],
     });
     const url =
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" +
@@ -439,7 +543,7 @@ ${memTxt}
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: sys }] },
         contents,
-        generationConfig: { temperature: 1.2, topP: 0.98 },
+        generationConfig: { temperature: 1.15, topP: 0.97 },
       }),
     });
     const data = await res.json();
@@ -449,32 +553,32 @@ ${memTxt}
     if (!out) throw new Error("empty_gemini");
     return out;
   }
-  async reply(userText, agent, env, episodes) {
-    const memories = this.salient(agent, episodes);
+  async reply(userText, agent, intent, env) {
+    const memories = this.salient(agent);
     let out;
+    const banned = /흥미롭다|그 부분만 조금 더 말해|응, 얘기해줘\. 듣고 있어/;
     if (env.GEMINI_API_KEY) {
       try {
-        out = await this.gemini(userText, agent, memories, env);
+        out = await this.gemini(userText, agent, memories, intent, env);
         this.mode = "gemini";
         this.lastError = null;
       } catch (e1) {
         try {
-          await new Promise((r) => setTimeout(r, 400));
-          out = await this.gemini(userText, agent, memories, env);
+          await new Promise((r) => setTimeout(r, 500));
+          out = await this.gemini(userText, agent, memories, intent, env);
           this.mode = "gemini";
           this.lastError = null;
         } catch (e2) {
-          out = this.template(userText, agent, memories);
+          out = this.template(userText, agent, intent);
           this.mode = "template_fallback";
-          this.lastError = String(e2 && e2.message ? e2.message : e2).slice(0, 300);
+          this.lastError = String(e2 && e2.message ? e2.message : e2).slice(0, 240);
         }
       }
     } else {
-      out = this.template(userText, agent, memories);
+      out = this.template(userText, agent, intent);
       this.mode = "template";
     }
-    const banned = /흥미롭다|그 부분만 조금 더 말해|응, 얘기해줘\. 듣고 있어/;
-    if (banned.test(out)) out = this.template(userText, agent, memories);
+    if (banned.test(out || "")) out = this.template(userText, agent, intent);
     this.history.push({ role: "user", content: userText || "(침묵)" });
     this.history.push({ role: "assistant", content: out });
     if (this.history.length > 24) this.history = this.history.slice(-24);
@@ -487,21 +591,31 @@ class ObsessionChatbot {
     this.agent = new ObsessionAgent();
     this.gen = new ResponseGenerator();
     this.episodes = [];
+    this.lastIntent = "chat";
   }
-  inferEvent(text) {
-    if (!String(text || "").trim()) return "ignore";
-    const sig = this.agent.backend.signals(text);
-    return sig.hostility > 0.5 ? "reject" : "reply";
+  inferEvent(text, intent) {
+    if (!String(text || "").trim() || intent === "silence") return "ignore";
+    if (intent === "reject") return "reject";
+    return "reply";
   }
   async turn(text, env) {
-    const event = this.inferEvent(text);
+    const intent = classifyIntent(text);
+    this.lastIntent = intent;
+    const event = this.inferEvent(text, intent);
     const rec = this.agent.step(text, event);
-    this.episodes.push({ t: rec.t, text: text || "(응답 없음)", event: rec.event, valence: rec.rpe });
-    // enrich salient memory text from episodes
-    for (const tr of this.agent.traces) {
-      const ep = this.episodes.find((e) => e.t === tr.t);
-      if (ep) tr._text = ep.text;
-    }
-    return this.gen.reply(text, this.agent, env, this.episodes);
+    this.episodes.push({ t: rec.t, text: text || "(응답 없음)", event: rec.event, intent, valence: rec.rpe });
+    return this.gen.reply(text, this.agent, intent, env);
+  }
+  serialize() {
+    return {
+      agent: this.agent.exportState(),
+      history: this.gen.history.slice(-24),
+      episodes: this.episodes.slice(-40),
+    };
+  }
+  restore(snap) {
+    if (snap.agent) this.agent.importState(snap.agent);
+    if (Array.isArray(snap.history)) this.gen.history = snap.history.slice(-24);
+    if (Array.isArray(snap.episodes)) this.episodes = snap.episodes.slice(-40);
   }
 }
