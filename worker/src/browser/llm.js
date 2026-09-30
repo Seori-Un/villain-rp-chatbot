@@ -18,7 +18,7 @@ const GEMINI_MODELS = [
   "gemini-2.0-flash",
   "gemini-flash-latest",
 ];
-const CLAUDE_MODELS = ["claude-sonnet-4-5", "claude-sonnet-4-20250514", "claude-3-5-sonnet-latest"];
+const CLAUDE_MODELS = ["claude-sonnet-5", "claude-sonnet-5-5", "claude-sonnet-4-6"];
 
 export function resolveBrowseLlm(env) {
   const anthropic =
@@ -89,14 +89,16 @@ async function claudePlan(apiKey, messages, preferTools) {
   let lastErr = null;
   for (const model of CLAUDE_MODELS) {
     const { system, claudeMessages } = toClaudeMessages(messages);
+    // Sonnet 5+: adaptive thinking (manual budget returns 400). No non-default temperature with thinking.
     const body = {
       model,
-      max_tokens: 4096,
-      temperature: 0.3,
+      max_tokens: 8192,
       system: system || "You are a careful browser automation agent.",
       messages: claudeMessages,
-      thinking: { type: "enabled", budget_tokens: 4000 },
+      thinking: { type: "adaptive" },
     };
+    // Prefer medium effort when supported (ignored / retried if rejected)
+    body.output_config = { effort: "medium" };
     if (preferTools) {
       body.tools = BROWSER_TOOLS.map((t) => ({
         name: t.function.name,
@@ -105,7 +107,7 @@ async function claudePlan(apiKey, messages, preferTools) {
       }));
     }
 
-    const res = await fetch(ANTHROPIC_URL, {
+    let res = await fetch(ANTHROPIC_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -114,15 +116,34 @@ async function claudePlan(apiKey, messages, preferTools) {
       },
       body: JSON.stringify(body),
     });
-    const data = await res.json().catch(() => ({}));
+    let data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const msg = `claude_${res.status}:${JSON.stringify(data).slice(0, 220)}`;
+      let msg = `claude_${res.status}:${JSON.stringify(data).slice(0, 220)}`;
       lastErr = msg;
       if (res.status === 404 || /not_found|deprecat|model/i.test(msg)) continue;
-      // thinking unsupported → retry without
-      if (/thinking|budget/i.test(msg) && body.thinking) {
-        delete body.thinking;
-        const res2 = await fetch(ANTHROPIC_URL, {
+
+      // Strip unsupported fields and retry once per model
+      let mutated = false;
+      if (/output_config|effort/i.test(msg) && body.output_config) {
+        delete body.output_config;
+        mutated = true;
+      }
+      if (/adaptive|thinking|budget|temperature|top_p|top_k/i.test(msg)) {
+        // Fall back: enabled budget (Sonnet 4.6) → then no thinking
+        if (body.thinking?.type === "adaptive") {
+          body.thinking = { type: "enabled", budget_tokens: 4000 };
+          mutated = true;
+        } else if (body.thinking) {
+          delete body.thinking;
+          mutated = true;
+        }
+        if ("temperature" in body) {
+          delete body.temperature;
+          mutated = true;
+        }
+      }
+      if (mutated) {
+        res = await fetch(ANTHROPIC_URL, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -131,9 +152,26 @@ async function claudePlan(apiKey, messages, preferTools) {
           },
           body: JSON.stringify(body),
         });
-        const data2 = await res2.json().catch(() => ({}));
-        if (res2.ok) return parseClaudeResponse(data2, model);
-        lastErr = `claude_${res2.status}:${JSON.stringify(data2).slice(0, 220)}`;
+        data = await res.json().catch(() => ({}));
+        if (res.ok) return parseClaudeResponse(data, model);
+        msg = `claude_${res.status}:${JSON.stringify(data).slice(0, 220)}`;
+        lastErr = msg;
+        // Final strip of thinking if still rejected
+        if (body.thinking && /thinking|budget|adaptive/i.test(msg)) {
+          delete body.thinking;
+          res = await fetch(ANTHROPIC_URL, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": apiKey,
+              "anthropic-version": "2023-06-01",
+            },
+            body: JSON.stringify(body),
+          });
+          data = await res.json().catch(() => ({}));
+          if (res.ok) return parseClaudeResponse(data, model);
+          lastErr = `claude_${res.status}:${JSON.stringify(data).slice(0, 220)}`;
+        }
       }
       continue;
     }
