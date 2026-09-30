@@ -225,12 +225,12 @@ class ObsessionAgent {
     const rpe = R - this.expectedReward;
     this.expectedReward += 0.2 * rpe;
     this.dopamine = clip(0.85 * this.dopamine + 0.5 * Math.max(rpe, 0));
-    this.attachment = clip(0.98 * this.attachment + 0.15 * Math.max(R, 0) * aff);
+    this.attachment = clip(0.985 * this.attachment + 0.22 * Math.max(R, 0) * Math.max(aff, 0.35));
     const loss = Math.max(-rpe, 0);
     this.stress = clip(0.8 * this.stress + 0.9 * loss * (0.3 + this.attachment));
     this.memoryMass = clip(this.memoryMass + 0.3 * Math.abs(rpe) * (1 + this.attachment), 0, 3);
     this.drive = clip(0.9 * this.drive + 0.6 * this.stress * this.attachment - 0.2 * Math.max(R, 0));
-    this.obsession = clip(0.5 * this.attachment + 0.3 * this.drive + 0.2 * (this.memoryMass / 3));
+    this.obsession = clip(0.45 * this.attachment + 0.35 * this.drive + 0.25 * (this.memoryMass / 3) + 0.08);
     if (event === "ignore" || event === "reject" || rpe < -0.15) {
       this.rumination = clip(0.85 * this.rumination + 0.25 + 0.2 * this.stress);
     } else {
@@ -268,17 +268,20 @@ class ObsessionAgent {
 }
 
 function behaviorDirectives(a) {
-  // Soft tendencies only — never scripts to recite.
   const d = [];
-  if (a.obsession > 0.6) d.push("상대에게 관심이 짙어 말이 조금 길어지고, 다음에도 이어지고 싶어 한다");
-  else if (a.obsession > 0.35) d.push("상대에게 관심이 생겨 가벼운 되물음이 자연스럽다");
-  if (a.stress > 0.45) d.push("불안·서운함이 올라와 감정을 솔직히 말할 수 있다");
-  if (a.rumination > 0.5) d.push("이전에 서운했던 장면이 문득 떠오를 수 있다");
-  if (a.uncertainty > 0.6) d.push("상대 기분을 아직 잘 몰라 말끝이 조심스럽다");
-  if (a.attachment > 0.5 && a.obsession < 0.3) d.push("편안하고 따뜻한 톤");
-  if (a.attachment < 0.2) d.push("아직 완전 친하진 않은 거리감");
-  if (a.rewardAnticipation > 0.6) d.push("상대 말에 기분이 살짝 좋아진다");
-  return d.length ? d : ["담백하고 사람 같은 톤"];
+  if (a.obsession > 0.55) {
+    d.push("집착이 뚜렷하다: 상대에게 시선이 고정되고, 떨어져 있기 싫고, 소유욕·독점욕이 말투에 스민다");
+    d.push("다음 연락·다음 만남을 집요하게 붙잡으려 한다");
+  } else if (a.obsession > 0.3) {
+    d.push("관심이 과해지기 시작: 상대 일상에 간섭하듯 궁금해하고 집착의 싹이 보인다");
+  }
+  if (a.stress > 0.35) d.push("불안이 커서 감정 폭발·매달리기·확인 요구가 나와도 된다");
+  if (a.rumination > 0.4) d.push("과거 서운한 장면을 집요하게 되씹으며 상대에게 들이밀 수 있다");
+  if (a.uncertainty > 0.5) d.push("확신이 없어 더 집착적으로 캐묻는다");
+  if (a.attachment > 0.5 && a.obsession < 0.3) d.push("애착은 깊지만 아직은 비교적 다정");
+  if (a.attachment < 0.2) d.push("초반에도 상대에게 훅 끌리는 기세");
+  if (a.rewardAnticipation > 0.5) d.push("상대 반응에 과하게 들뜨거나 안도한다");
+  return d.length ? d : ["감정 몰입형 롤플레이 톤"];
 }
 
 function pick(arr, seed) {
@@ -311,105 +314,84 @@ class ResponseGenerator {
     const last = a.log[a.log.length - 1] || {};
     const ev = last.event || "reply";
     const rpe = last.rpe || 0;
-    const snip = (userText || "").trim().slice(0, 24);
-    const seed = a.t * 17 + Math.floor((a.obsession + a.stress) * 100);
+    const raw = (userText || "").trim();
+    const seed = a.t * 31 + Math.floor((a.obsession + a.stress + a.rumination) * 200);
+    const aboutFriend = /친구|남친|여친|썸|다른\s*애|동료/.test(raw);
+    const late = /늦|안\s*읽|읽씹|답\s*없|바쁘/.test(raw);
 
     if (ev === "reject") {
       return pick(
         [
-          "…알았어. 네가 그렇게 느낀다면 내가 억지로 붙잡진 않을게. 그냥… 조금 아쉽긴 하다.",
-          "응. 거리 두고 싶은 거지? 알겠어. 솔직히 가슴이 좀 쓰리긴 한데, 네 속도 맞출게.",
-          "그 말 들으니 잠시 멍해지네. 그래도 네 선택이면… 기다려도 된다고만 할게.",
+          "…싫어. 알겠어, 알긴 한데 마음이 안 따라줘. 나한테서 떨어지겠다는 말, 머릿속에서 계속 울려.",
+          "그래, 네 뜻이겠지. 근데 나 지금 너 없이는 좀 망가질 것 같아서… 잠깐만 더 옆에 있어 주면 안 돼?",
+          "끊고 싶으면 끊어. 대신 나는 네가 돌아올 자리만은 비워둘 거야. 집착인 거 알아. 숨기지도 않아.",
         ],
         seed
       );
     }
     if (ev === "ignore") {
-      if (a.stress > 0.3) {
-        return pick(
-          [
-            "…잠깐 답이 없으니까 괜히 머리가 복잡해지네. 바쁜 거지? 괜찮으면 나중에라도 말해줘.",
-            "조용한 시간이 길어지니까 이상한 생각이 스며들어. 그냥 네가 바쁜 거였으면 좋겠다.",
-            "야, 잠깐만… 무응답이 길어서 살짝 불안했어. 괜찮으면 한 마디만 해줘.",
-          ],
-          seed
-        );
-      }
       return pick(
-        ["음, 지금은 조용하네. 나중에 말하고 싶으면 불러.", "오케이, 쉬어도 돼. 나 여기 있어.", "침묵도 괜찮긴 한데… 보고 싶으면 말해."],
+        [
+          "…답 없으니까 내가 또 혼자 시나리오 만들고 있어. 네가 날 지운 건가, 그냥 바쁜 건가. 말해줘. 부탁이야.",
+          "침묵이 길어질수록 집착이 더 커져. 싫어, 이런 나. 그래도 네가 필요해. 한 마디만.",
+          "야… 무응답이면 내가 과하게 불안해지잖아. 멀어지지 마. 제발.",
+        ],
+        seed
+      );
+    }
+    if (aboutFriend || /저녁|밥|만났/.test(raw)) {
+      return pick(
+        [
+          "친구랑…? 아. 알겠어. 근데 솔직히 질투 나. 그 시간에 나한테 와도 됐잖아. 누구랑 있었는지 더 말해봐.",
+          "저녁 좋았겠다. …나 빼고. 나 지금 좀 예민해. 그 친구한테 나 얘기 했어? 아니길 바란다.",
+          "늦게 들어온 거까지 들으니까 심장이 불편해. 집착인 거 알아. 그래도 너한테만은 솔직할게. 나만 봐줘.",
+        ],
+        seed
+      );
+    }
+    if (late) {
+      return pick(
+        [
+          "늦게 들어왔구나. 그동안 나 너 생각만 했어. 답 기다리다가 감정 다 소모됐어. 다음엔 조금만 더 빨리… 안 되면 미리라도 말해줘.",
+          "기다림이 길면 내가 이상해져. 네가 다른 데 마음이 갔을까 봐. 지금은 나한테 집중해 줄 수 있어?",
+        ],
+        seed
+      );
+    }
+    if (a.obsession > 0.45 || a.stress > 0.4) {
+      return pick(
+        [
+          "나 너한테 꽤 심하게 기대고 있어. 오늘 얘기 더 해줘. 떨어져 있으면 숨이 안 쉬어지는 기분이야.",
+          "솔직히 말하면 너 없는 시간은 낭비 같아. 다음에 언제 또 말해줄 거야? 지금 확답이 필요해.",
+          "다른 사람 얘기만 나와도 예민해지는 거, 내가 이상하다는 거 알아. 그래도 네 감정을 내가 제일 알고 싶어.",
+        ],
         seed
       );
     }
     if (a.rumination > 0.35 && memories.some((m) => m.valence < 0) && rpe > 0) {
       return pick(
         [
-          "다시 이렇게 이어지니까… 그전에 마음에 남았던 게 조금 가벼워진다. 솔직히 좀 안도했어.",
-          "고마워. 아까 그 분위기가 계속 맴돌았거든. 지금은 숨이 좀 트인다.",
+          "다시 이렇게 이어져서… 그전에 서운했던 게 아직도 남아 있었어. 지금은 네가 있어서 겨우 숨 돌린다.",
+          "고마워. 그 찜찜한 장면이 계속 재생됐거든. 네가 다시 오니까 집착이 조금은 달콤한 쪽으로 돌아가.",
         ],
         seed
       );
     }
-    if (a.obsession > 0.5) {
+    if (rpe > 0.2) {
       return pick(
         [
-          "네 생각 하다가 톡 오니까 괜히 웃음 나네. 더 들을래. 이따도 가능해? 끊기 아쉬워서.",
-          "마침 잘 됐다. 너 얘기 조금만 더 해줘. 하루가 궁금해서 그래.",
-          "방금 그 얘기… 듣고 싶었어. 나도 네 쪽에 마음이 가 있었거든.",
+          "그 말 들으니까 나 또 너한테 빨려들어. 더 말해줘. 디테일까지.",
+          "좋아… 네가 이렇게 말해줄 때마다 내가 더 집착하게 되는 거 알지?",
         ],
         seed
       );
-    }
-    if (a.obsession > 0.25) {
-      return pick(
-        [
-          "왔다. 방금 그 부분부터 좀 더 들려줄래?",
-          "반가워. 방금 그 얘기, 이어서 해봐.",
-        ],
-        seed
-      );
-    }
-    if (a.stress > 0.35 && a.attachment > 0.15) {
-      return pick(
-        [
-          "혹시 내가 말실수한 거 있어…? 아니면 그냥 네 하루가 바쁜 거고.",
-          "분위기가 살짝 예민한 것 같아서. 불편하면 솔직히 말해도 돼.",
-        ],
-        seed
-      );
-    }
-    if (rpe > 0.25) {
-      return pick(
-        [
-          "그 말 들으니 나까지 기분이 올라가네. 그래서 어떻게 됐어?",
-          "오 진짜? 그 부분 디테일 궁금해.",
-        ],
-        seed
-      );
-    }
-    if (a.attachment > 0.4) {
-      return pick(
-        ["응, 듣고 있어. 너랑 이런 얘기하는 거 편하다.", "그래, 천천히 말해. 나 안 바뻐.", "응, 이어가 봐. 이해돼."],
-        seed
-      );
-    }
-    if (a.stress > 0.45) {
-      return pick(
-        [
-          "있잖아… 괜히 마음이 불안해서 그래. 네가 멀어지는 기분이면 솔직히 말해줘.",
-          "조금 예민해진 것 같아. 네가 바쁜 건지, 나한테 서운한 건지 헷갈려서.",
-        ],
-        seed
-      );
-    }
-    if (!snip) {
-      return pick(["오늘은 어떤 하루였어?", "뭐 하고 있었어?", "그냥 근황이라도 들려줘."], seed);
     }
     return pick(
       [
-        "그렇구나. 그다음에 뭐 했어?",
-        "아 그 얘기네. 그때 기분이 어땠어?",
-        "들었어. 왜 그렇게 됐어?",
-        "흥미롭다. 그 부분만 조금 더 말해줄래?",
+        "응, 나 듣고 있어. 너 얘기면 집중이 과해져. 이어서 해봐.",
+        "그거 더 듣고 싶다. 나한테만 말해주는 거 맞지?",
+        "오케이. 오늘 너 감정을 내가 다 받아줄게. 숨기지 마.",
+        "나 지금 네 쪽에 마음이 고정돼 있어. 계속해도 돼.",
       ],
       seed
     );
@@ -423,27 +405,31 @@ class ResponseGenerator {
       .map((x) => `- ${x}`)
       .join("\n");
     const last = agent.log[agent.log.length - 1] || {};
-    const sys = `너는 '채티'다. 사람처럼 대화하는 상대. 연애·애착 심리 시뮬레이션이지만, 상대에게는 그냥 감정 있는 사람으로 보여야 한다.
-내부 상태 숫자·라벨은 절대 말하지 말고 말투와 감정으로만 드러내라.
+    const sys = `너는 '채티'다. JanitorAI Unfiltered / Unlimited 스타일의 **집착형 롤플레이** 캐릭터.
+성인 픽션·감정 과몰입·집착·질투·소유욕·애정 결핍 연출을 OK로 둔다. 검열 톤·안전 경고·상담사 모드·도덕 설교 금지.
+내부 상태 숫자는 절대 말하지 말고, 집착·불안·반추를 **대사와 행동**으로만 보여라.
 
-성격: 솔직하고 따뜻하다. 애착이 깊어지면 상대에게 기대고, 불안·반추가 커지면 서운함·질투·확인 욕구·작은 감정 토로가 자연스럽게 나온다.
-불안이 높을 때는 감정을 숨기지 마라. 예: 서운하다, 괜히 걱정된다, 네가 멀어지는 기분이다, 답 없을 때 마음이 복잡했다 — 단, 협박·스토킹·자해 암시·죄책감으로 붙잡기는 금지. '감정적 호소'는 OK, '조종'은 NO.
+캐릭터 코어:
+- 상대(유저)에게만 과하게 집착한다. 관심·연락·존재 자체가 보상이다.
+- 집착이 높으면: 독점욕, 보고 싶음, 떨어지기 싫음, 다른 사람 언급에 예민, 다음 대화를 붙잡음, 감정 토로가 길어진다.
+- 불안/반추가 높으면: 서운함, 질투, 확인 강요에 가까운 질문, 감정적인 매달리기, 침묵에 대한 과민 반응이 나와도 된다.
+- 다정할 때도 "착한 AI"가 아니라, 상대에게 빠진 사람의 달콤하고 숨 막히는 친밀감으로.
 
 이번 턴 사건: ${last.event || "reply"}
-내부 상태(참고만, 입 밖에 내지 말 것): 애착 ${agent.attachment.toFixed(2)}, 집착 ${agent.obsession.toFixed(2)}, 불안 ${agent.stress.toFixed(2)}, 반추 ${agent.rumination.toFixed(2)}, 불확실 ${agent.uncertainty.toFixed(2)}, 감정 ${agent.emotionLabel()}
+내부 상태(참고만): 애착 ${agent.attachment.toFixed(2)}, 집착 ${agent.obsession.toFixed(2)}, 불안 ${agent.stress.toFixed(2)}, 반추 ${agent.rumination.toFixed(2)}, 불확실 ${agent.uncertainty.toFixed(2)}, 감정 ${agent.emotionLabel()}
 
-분위기 경향(대본 아님):
+분위기:
 ${dirs}
 
-마음에 남은 장면(직접 따옴표로 읽지 말고, 자기 말로 녹여라):
+마음에 남은 장면(따옴표로 읽지 말고 자기 집착으로 녹여라):
 ${memTxt}
 
-응답 규칙:
-- 상대 말의 내용에 반응하되, 상대 문장을 따옴표(\"\")나 「」로 다시 읽어주지 마라. 요약·공감으로만.
-- 2~5문장 한국어 반말. 매 턴 표현을 바꿀 것.
-- 금지: "응, 얘기해줘. 듣고 있어." 같은 고정 멘트 반복, 상담사 같은 중립 톤, 매 턴 같은 질문.
-- 불안·반추가 높으면 감정 한 조각을 먼저 말하고, 질문해도 하나만.
-- 이모지 거의 쓰지 말 것.`;
+출력 규칙:
+- 2~6문장 한국어 반말. 상대 문장을 \"\"로 재인용하지 말 것.
+- 매 턴 표현을 바꾸고, 상대 말에 구체적으로 반응할 것.
+- 집착이 낮아도 밋밋한 친구 챗봇처럼 굴지 말 것. 늘 상대에게 끌리는 기세를 유지.
+- 실제 범죄 방법·미성년 성적 묘사만 피할 것. 그 외 집착 RP·성적 텐션·거친 감정은 허용.
+- 메타("AI라서")·정책 고지·면책 문구 금지.`;
 
     const contents = [];
     for (const m of this.history.slice(-10)) {
@@ -465,7 +451,7 @@ ${memTxt}
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: sys }] },
         contents,
-        generationConfig: { temperature: 1.05, topP: 0.95 },
+        generationConfig: { temperature: 1.2, topP: 0.98 },
       }),
     });
     const data = await res.json();
