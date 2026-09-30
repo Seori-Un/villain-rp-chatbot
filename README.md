@@ -9,7 +9,7 @@ Kaggle (PDF RAG) + Cloudflare Worker + chat frontend.
 - `kaggle/` — Kaggle notebook + Hangul PDF filter patch
 - `prompts/system_prompt.txt` — villain RP system prompt
 - `worker/` — Cloudflare Worker (`POST /chat`)
-- `frontend/` — chat UI (TBD)
+- `frontend/` — static chat UI (Points at Worker `/chat`)
 
 ## Deploy Worker from GitHub only
 Cloudflare Dashboard → Workers & Pages → Create → Connect GitHub repo `Seori-Un/villain-rp-chatbot` → root directory `worker` → Deploy.
@@ -19,3 +19,9 @@ Secrets: `KAGGLE_API_BASE` (ngrok URL), optional `SYSTEM_PROMPT`.
 
 ## Kaggle notebook
 https://www.kaggle.com/code/seoriun/notebookf32ae7a716/edit
+
+
+## Frontend
+정적 파일: `frontend/index.html`
+로컬: 폴더를 열어두거나 Cloudflare Pages로 `frontend` 배포.
+기본 API: `https://villain-rp-chatbot.e5eeeee.workers.dev` (`?api=` 로 변경 가능)
