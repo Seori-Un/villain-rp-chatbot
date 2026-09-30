@@ -27,15 +27,19 @@ https://www.kaggle.com/code/seoriun/notebookf32ae7a716/edit
 기본 API: `https://villain-rp-chatbot.e5eeeee.workers.dev` (`?api=` 로 변경 가능)
 헤더 **「웹 시켜줘」** → Worker `POST /browse` (RP 채팅과 독립)
 
-## Browser agent (optional, v1 scaffold)
+## Browser agent (v2 — thinking timeline)
 
-채티 형제 엔드포인트 `POST /browse` — 클릭·타이핑 자동화 스캐폴드.
-Workers alone cannot run Playwright; connect a runner via secrets:
+`POST /browse` — multi-step web agent with Claude-style **「생각 중」** UI.
+Browse LLM: **Claude** (if `ANTHROPIC_API_KEY`) → **Gemini** (`GEMINI_API_KEY`) → Groq fallback.
+**`/chat` stays on Groq** for fast RP.
 
-- `BROWSER_API_URL` — ngrok/VPS Playwright (`browser-runner/`) or Browserbase gateway
-- `BROWSER_API_KEY` — shared bearer token
+Secrets:
 
-Without these secrets, **`/chat` still works**; `/browse` returns `browser_not_configured`.
+- `BROWSER_API_URL` / `BROWSER_API_KEY` — Playwright runner (trycloudflare / ngrok / VPS)
+- `GEMINI_API_KEY` — browse loop (recommended without Anthropic)
+- `ANTHROPIC_API_KEY` — optional, for true Claude Sonnet + extended thinking
+
+Without browser secrets, **`/chat` still works**; `/browse` returns `browser_not_configured`.
 
 Docs: [`docs/browser-agent.md`](docs/browser-agent.md)
 

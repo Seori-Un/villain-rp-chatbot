@@ -1,6 +1,6 @@
 /**
- * 채티 v2.3 — 집착 동역학 롤플레이 + optional browser agent (/browse)
- * Secrets: GROQ_API_KEY (primary), GEMINI_API_KEY (optional fallback)
+ * 채티 v2.4 — 집착 동역학 롤플레이 + optional browser agent (/browse)
+ * Secrets: GROQ_API_KEY (RP /chat), GEMINI_API_KEY (browse + chat fallback), optional ANTHROPIC_API_KEY (browse Claude)
  * Optional: BROWSER_API_URL, BROWSER_API_KEY (see docs/browser-agent.md)
  * /chat unchanged when browser secrets missing.
  */
@@ -28,7 +28,7 @@ export default {
       return json({
         ok: true,
         bot: "채티",
-        version: "obsession-v2.3-browse-scaffold",
+        version: "obsession-v2.4-browse-thinking",
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
         sessions: SESSIONS.size,

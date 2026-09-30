@@ -1,5 +1,5 @@
 /**
- * Browser agent tool schemas (OpenAI/Groq function-calling shape)
+ * Browser agent tool schemas (OpenAI/Groq/Claude/Gemini shapes)
  * + ReAct JSON fallback prompt fragment.
  */
 
@@ -23,7 +23,12 @@ export const BROWSER_TOOLS = [
     function: {
       name: "screenshot",
       description: "Capture current page observation (URL, title, text snippet, screenshot).",
-      parameters: { type: "object", properties: {}, additionalProperties: false },
+      parameters: {
+        type: "object",
+        properties: {
+          full_page: { type: "boolean", description: "Optional; runner may ignore" },
+        },
+      },
     },
   },
   {
@@ -78,11 +83,11 @@ export const BROWSER_TOOLS = [
     type: "function",
     function: {
       name: "done",
-      description: "Finish the task and report a Korean summary to the user.",
+      description: "Finish the task and report a clear Korean summary to the user.",
       parameters: {
         type: "object",
         properties: {
-          summary: { type: "string", description: "What was done / result" },
+          summary: { type: "string", description: "What was done / result in Korean" },
         },
         required: ["summary"],
       },
@@ -92,45 +97,97 @@ export const BROWSER_TOOLS = [
 
 export const TOOL_NAMES = BROWSER_TOOLS.map((t) => t.function.name);
 
+/** Gemini functionDeclarations (strip OpenAI wrapper). */
+export function geminiFunctionDeclarations() {
+  return BROWSER_TOOLS.map((t) => ({
+    name: t.function.name,
+    description: t.function.description,
+    parameters: t.function.parameters || { type: "object", properties: {} },
+  }));
+}
+
 /** System prompt for tool-calling or ReAct JSON mode */
 export function browserSystemPrompt({ maxSteps }) {
-  return `너는 브라우저 자동화 에이전트다. 사용자 goal을 달성하기 위해 도구만 사용한다.
-다단계 작업은 "n/${maxSteps} 단계" 식으로 짧게 보고한다 (한국어).
+  return `너는 신중한 브라우저 자동화 에이전트다. 사용자 goal을 달성하기 위해 도구를 사용한다.
+매 행동 전에 짧게 생각하고(한국어), 관찰한 뒤 다음 행동을 고른다.
+다단계 작업은 "n/${maxSteps} 단계" 식으로 보고한다.
 
 도구: open, screenshot, click, type, scroll, done
 규칙:
 - 먼저 open 또는 screenshot으로 관찰한 뒤 행동한다.
+- 클릭·입력 뒤에는 가능하면 screenshot으로 결과를 확인한다.
 - 결제/은행/체크아웃 페이지는 열지 말고 done으로 거절한다.
 - 로그인·비밀번호 입력은 사용자가 confirm하기 전에는 type 하지 않는다.
 - 채팅에 적힌 비밀번호를 마음대로 type 하지 않는다.
 - CSAM·범죄·해킹·사기 요청은 즉시 done으로 거절한다.
-- 끝나면 반드시 done(summary)을 호출한다.
-- 응답은 도구 호출만. (ReAct 모드면 아래 JSON 한 줄만)
+- 도구 오류가 나면 한 번 다른 방법(다른 selector, screenshot)으로 재시도한다.
+- 끝나면 반드시 done(summary)을 호출한다. summary는 한국어로 구체적이고 친절하게.
+- 응답은 도구 호출 우선. (ReAct 모드면 아래 JSON 한 줄만)
+- thought 필드에 한국어로 지금 왜 이 행동을 하는지 1~2문장 적는다.
 
 ReAct JSON 형식 예:
-{"thought":"페이지를 연다","action":"open","args":{"url":"https://example.com"}}
-{"thought":"완료","action":"done","args":{"summary":"1/1 단계: 열었다."}}`;
+{"thought":"예제 페이지를 연다","action":"open","args":{"url":"https://example.com"}}
+{"thought":"제목을 확인했다","action":"done","args":{"summary":"example.com을 열었고 제목은 Example Domain이야."}}`;
 }
 
 /**
  * Parse ReAct-style JSON action from model text.
  * @returns {{ action: string, args: object, thought?: string } | null}
  */
-export function parseReactAction(text) {
-  const raw = String(text || "").trim();
-  if (!raw) return null;
-  // fenced or bare JSON
+/** Extract first balanced JSON object from text. */
+export function extractFirstJsonObject(text) {
+  const raw = String(text || "");
   const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const candidate = fence ? fence[1].trim() : raw;
-  const start = candidate.indexOf("{");
-  const end = candidate.lastIndexOf("}");
-  if (start < 0 || end <= start) return null;
+  const candidate = fence ? fence[1] : raw;
+  let i = 0;
+  while (i < candidate.length) {
+    const start = candidate.indexOf("{", i);
+    if (start < 0) return null;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let j = start; j < candidate.length; j++) {
+      const ch = candidate[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === "\\") esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            return JSON.parse(candidate.slice(start, j + 1));
+          } catch {
+            i = j + 1;
+            break;
+          }
+        }
+      }
+    }
+    if (depth !== 0) return null;
+  }
+  return null;
+}
+
+export function parseReactAction(text) {
+  const obj = extractFirstJsonObject(text);
+  if (!obj || typeof obj !== "object") return null;
   try {
-    const obj = JSON.parse(candidate.slice(start, end + 1));
     const action = obj.action || obj.name || obj.tool;
     if (!action || !TOOL_NAMES.includes(action)) return null;
-    const args = obj.args || obj.arguments || obj.parameters || {};
-    return { action, args: typeof args === "string" ? JSON.parse(args) : args, thought: obj.thought };
+    let args = obj.args || obj.arguments || obj.parameters || {};
+    if (typeof args === "string") {
+      try {
+        args = JSON.parse(args);
+      } catch {
+        args = {};
+      }
+    }
+    return { action, args, thought: obj.thought || obj.reasoning || obj.thinking };
   } catch {
     return null;
   }
@@ -146,7 +203,10 @@ export function normalizeToolCalls(message) {
     if (!name || !TOOL_NAMES.includes(name)) continue;
     let args = {};
     try {
-      args = typeof c.function?.arguments === "string" ? JSON.parse(c.function.arguments || "{}") : c.function?.arguments || {};
+      args =
+        typeof c.function?.arguments === "string"
+          ? JSON.parse(c.function.arguments || "{}")
+          : c.function?.arguments || {};
     } catch {
       args = {};
     }

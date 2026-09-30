@@ -22,7 +22,7 @@
     <div id="browsePanel" class="browse-panel" hidden>
       <div class="browse-head">
         <strong>웹 심부름</strong>
-        <span class="browse-hint">대신 열어보고 클릭·타이핑까지 — RP랑 따로야</span>
+        <span class="browse-hint">대신 열어보고 클릭·타이핑까지 — RP랑 따로야 · 생각 과정 표시</span>
       </div>
       <label class="browse-label" for="browseGoal">목표</label>
       <textarea id="browseGoal" rows="2" placeholder="예: example.com 열어서 제목 알려줘"></textarea>
@@ -30,7 +30,10 @@
         <button type="button" id="browseRun">시켜보기</button>
         <span id="browseStatus" class="browse-status idle" aria-live="polite">대기</span>
       </div>
-      <ol id="browseSteps" class="browse-steps" aria-label="단계 로그"></ol>
+      <details id="browseThinking" class="browse-thinking" open>
+        <summary>생각 중 <span id="browseThinkMeta" class="think-meta"></span></summary>
+        <ol id="browseSteps" class="browse-steps" aria-label="생각·도구 타임라인"></ol>
+      </details>
       <figure id="browseShotWrap" class="browse-shot" hidden>
         <figcaption>마지막 화면</figcaption>
         <img id="browseShot" alt="browse screenshot" />

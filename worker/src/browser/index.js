@@ -1,10 +1,12 @@
 /**
  * POST /browse handler — optional sibling to RP /chat.
- * Backward compatible: without BROWSER_API_URL returns clear error; /chat untouched.
+ * Browse LLM: Claude (if ANTHROPIC_API_KEY) → Gemini → Groq.
+ * /chat stays on Groq RP and is untouched by browse failures.
  */
 
 import { isBrowserConfigured } from "./safety.js";
 import { runBrowserAgent } from "./agent.js";
+import { resolveBrowseLlm } from "./llm.js";
 
 export async function handleBrowse(request, env) {
   let body;
@@ -16,7 +18,7 @@ export async function handleBrowse(request, env) {
 
   const goal = (body.goal || body.message || body.text || "").toString();
   const session_id = (body.session_id || body.sessionId || "").toString() || undefined;
-  const max_steps = body.max_steps ?? body.maxSteps ?? 8;
+  const max_steps = body.max_steps ?? body.maxSteps ?? 12;
   const confirm = body.confirm && typeof body.confirm === "object" ? body.confirm : {};
 
   if (!isBrowserConfigured(env)) {
@@ -34,14 +36,17 @@ export async function handleBrowse(request, env) {
     };
   }
 
-  if (!env.GROQ_API_KEY) {
+  const llm = resolveBrowseLlm(env);
+  if (!llm.provider) {
     return {
       status: 503,
       body: {
         ok: false,
         error: "no_llm",
-        reply: "GROQ_API_KEY가 없어 브라우저 에이전트 루프를 돌릴 수 없어.",
+        reply:
+          "브라우즈용 LLM 키가 없어. GEMINI_API_KEY 또는 ANTHROPIC_API_KEY를 Worker secret으로 넣어줘. (/chat용 GROQ는 그대로 둬도 돼)",
         browser: "configured",
+        hint_anthropic: "wrangler secret put ANTHROPIC_API_KEY  # Claude Sonnet + extended thinking",
       },
     };
   }
@@ -59,8 +64,15 @@ export async function handleBrowse(request, env) {
 }
 
 export function browserHealth(env) {
+  const llm = resolveBrowseLlm(env);
   return {
     browse: true,
     browser_api: isBrowserConfigured(env),
+    browse_llm: llm.provider || null,
+    browse_llm_note: llm.note,
+    anthropic: Boolean(
+      (env.ANTHROPIC_API_KEY && String(env.ANTHROPIC_API_KEY).trim()) ||
+        (env.CLAUDE_API_KEY && String(env.CLAUDE_API_KEY).trim())
+    ),
   };
 }

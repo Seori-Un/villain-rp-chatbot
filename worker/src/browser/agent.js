@@ -1,14 +1,13 @@
 /**
- * Browser agent loop: Groq native tool calling when available,
- * else ReAct JSON actions. Executes via browser client + safety.
+ * Browser agent loop — Claude (if key) → Gemini → Groq.
+ * Emits structured steps: {type: think|tool|observe, content, ...}
+ * Keeps /chat Groq RP untouched.
  */
 
-import { BROWSER_TOOLS, browserSystemPrompt, parseReactAction, normalizeToolCalls } from "./tools.js";
+import { browserSystemPrompt, TOOL_NAMES } from "./tools.js";
 import { checkGoal, checkAction } from "./safety.js";
 import { browserAct, compactObservation } from "./client.js";
-
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"];
+import { planBrowseStep, resolveBrowseLlm } from "./llm.js";
 
 /**
  * @param {object} opts
@@ -18,7 +17,7 @@ const MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
  * @param {number} [opts.max_steps]
  * @param {object} [opts.confirm]
  */
-export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, confirm = {} }) {
+export async function runBrowserAgent({ goal, env, session_id, max_steps = 12, confirm = {} }) {
   const goalCheck = checkGoal(goal);
   if (!goalCheck.ok) {
     return {
@@ -26,67 +25,179 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
       error: goalCheck.code,
       reply: goalCheck.message,
       steps: [],
+      thinking: [],
       needs_confirm: goalCheck.needs_confirm || null,
+      llm: resolveBrowseLlm(env).note,
     };
   }
 
-  const maxSteps = Math.max(1, Math.min(12, Number(max_steps) || 8));
+  const llmInfo = resolveBrowseLlm(env);
+  if (!llmInfo.provider) {
+    return {
+      ok: false,
+      error: "no_llm",
+      reply:
+        "브라우즈용 LLM 키가 없어. GEMINI_API_KEY(권장) 또는 ANTHROPIC_API_KEY를 Worker secret으로 넣어줘. (진짜 Claude thinking은 Anthropic 키 필요)",
+      steps: [],
+      thinking: [],
+      needs_confirm: null,
+      llm: "no_llm",
+      hint_anthropic: "For Claude Sonnet + extended thinking: wrangler secret put ANTHROPIC_API_KEY",
+    };
+  }
+
+  const maxSteps = Math.max(1, Math.min(20, Number(max_steps) || 12));
   const sid = session_id || crypto.randomUUID();
+  /** @type {object[]} timeline steps for UI */
   const steps = [];
   let page = { url: "", title: "" };
   let needsConfirm = null;
-  let lastScreenshot = null; // base64 or data URL for UI (not sent to LLM)
+  let lastScreenshot = null;
+  let actionCount = 0;
+  let providerUsed = llmInfo.provider;
+  let modelUsed = null;
 
   const system = browserSystemPrompt({ maxSteps });
-  /** @type {{role:string, content?:string, tool_calls?:any[], tool_call_id?:string}[]} */
+  /** @type {{role:string, content?:string, tool_calls?:any[], tool_call_id?:string, name?:string}[]} */
   const messages = [
     { role: "system", content: system },
     {
       role: "user",
-      content: `목표: ${goal}\n세션: ${sid}\n최대 ${maxSteps} 단계. 한국어로 요약해.`,
+      content: `목표: ${goal}\n세션: ${sid}\n최대 ${maxSteps} 단계.\n매 행동 전 한국어로 짧게 생각하고, 끝나면 done(summary)으로 한국어 요약해.`,
     },
   ];
 
-  let mode = "tools"; // or "react"
+  let mode = "tools";
   let finalSummary = null;
+  let consecutivePlanFails = 0;
+
+  pushStep(steps, {
+    type: "think",
+    content: `목표를 확인했어. 웹을 탐색할게. (선호 LLM: ${llmInfo.provider})`,
+  });
 
   for (let n = 1; n <= maxSteps; n++) {
-    const planned = await planNext({ env, messages, mode });
-    mode = planned.mode;
+    const planned = await planBrowseStep({ env, messages, preferTools: mode !== "react_only" });
+    if (planned.provider) providerUsed = planned.provider;
+    if (planned.model) modelUsed = planned.model;
+    if (planned.mode) mode = planned.mode;
 
-    if (planned.error && !planned.actions.length) {
-      const early = {
-        ok: false,
-        error: planned.error,
-        reply: `${n}/${maxSteps} 단계: LLM 계획 실패 — ${planned.error}`,
-        steps,
-        needs_confirm: null,
-        mode,
-        session_id: sid,
-        browser: "configured",
-      };
-      if (lastScreenshot && String(lastScreenshot).length <= 400000) {
-        early.last_screenshot = lastScreenshot;
-      }
-      return early;
+    if (planned.thinking) {
+      pushStep(steps, { type: "think", content: planned.thinking });
+    } else if (planned.provider && n === 1) {
+      const fb = planned.gemini_quota_fallback ? " (Gemini 쿼터 초과 → 폴백)" : "";
+      pushStep(steps, {
+        type: "think",
+        content: `${planned.provider}${planned.model ? " / " + planned.model : ""} 로 계획 중.${fb}`,
+      });
     }
 
-    // If model returned plain text without tools, treat as done summary
+    if (planned.error && !planned.actions.length && !planned.text) {
+      consecutivePlanFails += 1;
+      pushStep(steps, {
+        type: "think",
+        content: `계획 실패 (${planned.error}). ${consecutivePlanFails < 2 ? "다시 시도할게." : "여기서 멈출게."}`,
+      });
+      if (consecutivePlanFails >= 2) {
+        return finish({
+          ok: false,
+          reply: `${n}/${maxSteps} 단계: LLM 계획 실패 — ${planned.error}`,
+          steps,
+          needsConfirm: null,
+          mode,
+          sid,
+          maxSteps,
+          n,
+          error: planned.error,
+          lastScreenshot,
+          providerUsed,
+          modelUsed,
+          llmInfo,
+        });
+      }
+      // nudge and retry
+      messages.push({
+        role: "user",
+        content:
+          '이전 응답을 파싱할 수 없었어. JSON 한 줄만: {"thought":"...","action":"open|screenshot|click|type|scroll|done","args":{...}}',
+      });
+      mode = "react_only";
+      continue;
+    }
+    consecutivePlanFails = 0;
+
     if (!planned.actions.length && planned.text) {
+      const looksLikeToolJson =
+        /"action"\s*:/.test(planned.text) || /"tool"\s*:/.test(planned.text);
+      if (looksLikeToolJson) {
+        // re-parse aggressively; if still fail, nudge instead of treating as done
+        pushStep(steps, {
+          type: "think",
+          content: "모델이 JSON을 냈지만 파싱에 실패했어. 다시 요청할게.",
+        });
+        messages.push({
+          role: "user",
+          content:
+            'JSON이 깨졌어. 딱 한 개만: {"thought":"한국어","action":"open|screenshot|click|type|scroll|done","args":{...}}',
+        });
+        mode = "react_only";
+        consecutivePlanFails += 1;
+        if (consecutivePlanFails >= 3) {
+          return finish({
+            ok: false,
+            reply: `${n}/${maxSteps} 단계: 도구 JSON 파싱 반복 실패`,
+            steps,
+            needsConfirm: null,
+            mode,
+            sid,
+            maxSteps,
+            n,
+            error: "no_action_parsed",
+            lastScreenshot,
+            providerUsed,
+            modelUsed,
+            llmInfo,
+          });
+        }
+        continue;
+      }
       finalSummary = planned.text.trim();
-      steps.push({ n, tool: "done", args: { summary: finalSummary }, ok: true, source: "text" });
+      pushStep(steps, {
+        type: "tool",
+        n,
+        tool: "done",
+        args: { summary: finalSummary },
+        ok: true,
+        content: finalSummary,
+        source: "text",
+      });
       break;
     }
 
+    // Attach thought from first action if present and not already pushed
+    const firstThought = planned.actions[0]?.thought;
+    if (firstThought && firstThought !== planned.thinking) {
+      pushStep(steps, { type: "think", content: String(firstThought) });
+    }
+
+    let batchDone = false;
     for (const act of planned.actions) {
+      if (!TOOL_NAMES.includes(act.action)) continue;
+
       if (act.action === "done") {
         finalSummary = String(act.args?.summary || act.args?.message || "완료").trim();
-        steps.push({ n, tool: "done", args: { summary: finalSummary }, ok: true });
-        // tool result for completeness
+        pushStep(steps, {
+          type: "tool",
+          n,
+          tool: "done",
+          args: { summary: finalSummary },
+          ok: true,
+          content: finalSummary,
+        });
         if (act.id) {
           messages.push({
             role: "assistant",
-            content: null,
+            content: planned.text || null,
             tool_calls: [
               {
                 id: act.id,
@@ -98,27 +209,57 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
           messages.push({
             role: "tool",
             tool_call_id: act.id,
+            name: "done",
             content: JSON.stringify({ ok: true }),
           });
         }
-        return finish(true, finalSummary, steps, null, mode, sid, maxSteps, n, undefined, lastScreenshot);
+        return finish({
+          ok: true,
+          reply: finalSummary,
+          steps,
+          needsConfirm: null,
+          mode,
+          sid,
+          maxSteps,
+          n,
+          error: undefined,
+          lastScreenshot,
+          providerUsed,
+          modelUsed,
+          llmInfo,
+        });
       }
 
       const safe = checkAction(act, confirm, page);
       if (!safe.ok) {
-        steps.push({
+        pushStep(steps, {
+          type: "tool",
           n,
           tool: act.action,
           args: redactArgs(act.args),
           ok: false,
           error: safe.code,
+          content: safe.message,
           message: safe.message,
         });
         if (safe.needs_confirm) {
           needsConfirm = safe.needs_confirm;
-          return finish(false, safe.message, steps, needsConfirm, mode, sid, maxSteps, n, safe.code, lastScreenshot);
+          return finish({
+            ok: false,
+            reply: safe.message,
+            steps,
+            needsConfirm,
+            mode,
+            sid,
+            maxSteps,
+            n,
+            error: safe.code,
+            lastScreenshot,
+            providerUsed,
+            modelUsed,
+            llmInfo,
+          });
         }
-        // feed refusal back to model and continue
         appendToolResult(messages, act, mode, planned, {
           ok: false,
           error: safe.code,
@@ -127,12 +268,8 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
         continue;
       }
 
-      let result;
-      if (act.action === "screenshot" || act.action === "open" || act.action === "click" || act.action === "type" || act.action === "scroll") {
-        result = await browserAct(env, { action: act.action, args: act.args, session_id: sid });
-      } else {
-        result = { ok: false, error: "unknown_action", message: act.action };
-      }
+      let result = await execWithRetry(env, act, sid);
+      actionCount += 1;
 
       if (result.url) page.url = result.url;
       if (result.title) page.title = result.title;
@@ -141,55 +278,200 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
       if (shot && typeof shot === "string") lastScreenshot = shot;
 
       const compact = compactObservation(result);
-      steps.push({
+      pushStep(steps, {
+        type: "tool",
         n,
         tool: act.action,
         args: redactArgs(act.args),
         ok: compact.ok,
+        content: summarizeTool(act, compact),
         observation: compact,
+        error: compact.ok ? undefined : compact.error,
       });
+
+      const obsText = formatObserve(compact);
+      pushStep(steps, {
+        type: "observe",
+        n,
+        content: obsText,
+        observation: compact,
+        ok: compact.ok,
+      });
+
       appendToolResult(messages, act, mode, planned, compact);
 
       if (!compact.ok && result.error === "browser_not_configured") {
-        return finish(
-          false,
-          "브라우저 러너가 연결되지 않았어. BROWSER_API_URL + browser-runner(또는 Browserbase)를 설정해줘.",
+        return finish({
+          ok: false,
+          reply:
+            "브라우저 러너가 연결되지 않았어. BROWSER_API_URL + browser-runner(또는 Browserbase)를 설정해줘.",
           steps,
-          null,
+          needsConfirm: null,
           mode,
           sid,
           maxSteps,
           n,
-          "browser_not_configured",
-          lastScreenshot
-        );
+          error: "browser_not_configured",
+          lastScreenshot,
+          providerUsed,
+          modelUsed,
+          llmInfo,
+        });
+      }
+
+      // Periodic screenshot observe for richer context (every 2 non-screenshot actions)
+      if (
+        compact.ok &&
+        act.action !== "screenshot" &&
+        actionCount % 2 === 0 &&
+        n < maxSteps
+      ) {
+        const shotRes = await browserAct(env, { action: "screenshot", args: {}, session_id: sid });
+        if (shotRes.url) page.url = shotRes.url;
+        if (shotRes.title) page.title = shotRes.title;
+        const shotB = shotRes.screenshot_b64 || shotRes.screenshot || shotRes.screenshot_url;
+        if (shotB && typeof shotB === "string") lastScreenshot = shotB;
+        const shotCompact = compactObservation(shotRes);
+        pushStep(steps, {
+          type: "observe",
+          n,
+          content: "화면 확인: " + formatObserve(shotCompact),
+          observation: shotCompact,
+          ok: shotCompact.ok,
+          auto_screenshot: true,
+        });
+        messages.push({
+          role: "user",
+          content: `자동 화면 관찰(JSON): ${JSON.stringify(shotCompact)}\n이어서 다음 행동을 정해.`,
+        });
+      }
+
+      if (act.action === "done") {
+        batchDone = true;
+        break;
       }
     }
 
-    if (finalSummary) break;
+    if (finalSummary || batchDone) break;
+
+    // After a full plan batch with no done, nudge model to continue or finish
+    if (n === maxSteps) break;
+    messages.push({
+      role: "user",
+      content: `지금까지 ${actionCount}개 액션. 목표가 달성됐으면 done(summary), 아니면 다음 도구를 호출해. 한국어 thought 포함.`,
+    });
   }
 
   if (!finalSummary) {
-    finalSummary = `${maxSteps}/${maxSteps} 단계: 최대 단계에 도달했어. 지금까지 ${steps.length}개 액션 실행.`;
+    finalSummary = buildPartialSummary(steps, maxSteps, page);
   }
-  return finish(true, finalSummary, steps, needsConfirm, mode, sid, maxSteps, steps.length || maxSteps, undefined, lastScreenshot);
+  return finish({
+    ok: true,
+    reply: finalSummary,
+    steps,
+    needsConfirm,
+    mode,
+    sid,
+    maxSteps,
+    n: Math.min(maxSteps, steps.filter((s) => s.type === "tool").length || maxSteps),
+    error: undefined,
+    lastScreenshot,
+    providerUsed,
+    modelUsed,
+    llmInfo,
+  });
 }
 
-function finish(ok, reply, steps, needsConfirm, mode, sid, maxSteps, n, error, lastScreenshot) {
+async function execWithRetry(env, act, sid) {
+  let result = await browserAct(env, { action: act.action, args: act.args, session_id: sid });
+  if (result.ok !== false) return result;
+  // one retry on transient errors
+  if (/timeout|fetch_failed|browser_http_5|runner_error/i.test(String(result.error || ""))) {
+    await new Promise((r) => setTimeout(r, 400));
+    result = await browserAct(env, { action: act.action, args: act.args, session_id: sid });
+  }
+  return result;
+}
+
+function pushStep(steps, step) {
+  steps.push({
+    ...step,
+    at: Date.now(),
+  });
+}
+
+function summarizeTool(act, compact) {
+  const a = act.args || {};
+  if (act.action === "open") return `열기 ${a.url || ""}`.trim();
+  if (act.action === "click") return `클릭 ${a.selector || `(${a.x},${a.y})`}`;
+  if (act.action === "type") return `입력 ${a.selector || ""} ← ${a.text === "***" ? "***" : String(a.text || "").slice(0, 40)}`;
+  if (act.action === "scroll") return `스크롤 ${a.direction || "down"}`;
+  if (act.action === "screenshot") return "화면 캡처";
+  if (!compact.ok) return `실패: ${compact.error || "error"}`;
+  return act.action;
+}
+
+function formatObserve(compact) {
+  if (!compact) return "(관찰 없음)";
+  if (!compact.ok) return `실패 — ${compact.error || "error"}`;
+  const bits = [];
+  if (compact.title) bits.push(`제목: ${String(compact.title).slice(0, 80)}`);
+  if (compact.url) bits.push(`URL: ${String(compact.url).slice(0, 100)}`);
+  if (compact.text) bits.push(`본문: ${String(compact.text).slice(0, 180)}`);
+  return bits.join(" · ") || "페이지 관찰 완료";
+}
+
+function buildPartialSummary(steps, maxSteps, page) {
+  const tools = steps.filter((s) => s.type === "tool");
+  const lastObs = [...steps].reverse().find((s) => s.type === "observe" && s.ok);
+  const title = lastObs?.observation?.title || page.title || "";
+  const url = lastObs?.observation?.url || page.url || "";
+  let msg = `${maxSteps}/${maxSteps} 단계: 최대 단계에 도달했어. ${tools.length}개 액션 실행.`;
+  if (title || url) msg += ` 마지막 페이지${title ? ` 「${title}」` : ""}${url ? ` (${url})` : ""}.`;
+  return msg;
+}
+
+function finish({
+  ok,
+  reply,
+  steps,
+  needsConfirm,
+  mode,
+  sid,
+  maxSteps,
+  n,
+  error,
+  lastScreenshot,
+  providerUsed,
+  modelUsed,
+  llmInfo,
+}) {
   const prefixed =
     reply && !/^\d+\s*\/\s*\d+\s*단계/.test(reply) ? `${n}/${maxSteps} 단계: ${reply}` : reply;
+
+  // thinking[] = think-type steps for convenience
+  const thinking = steps.filter((s) => s.type === "think").map((s) => s.content);
+
   const out = {
     ok,
     error: error || (ok ? undefined : "failed"),
     reply: prefixed,
     steps,
+    thinking,
     needs_confirm: needsConfirm,
     mode,
     session_id: sid,
     browser: "configured",
+    llm: providerUsed || llmInfo?.provider || llmInfo?.note,
+    model: modelUsed || undefined,
   };
+  if (llmInfo?.provider !== "claude") {
+    out.hint_anthropic =
+      "True Claude extended thinking needs Worker secret ANTHROPIC_API_KEY (or CLAUDE_API_KEY). Browse currently uses " +
+      (providerUsed || "gemini") +
+      ".";
+  }
   if (lastScreenshot) {
-    // Cap huge payloads (~400KB chars) — UI optional preview only
     const s = String(lastScreenshot);
     if (s.length <= 400000) out.last_screenshot = s;
   }
@@ -206,8 +488,7 @@ function redactArgs(args) {
 }
 
 function appendToolResult(messages, act, mode, planned, compact) {
-  if (mode === "tools" && act.id) {
-    // Ensure assistant tool_calls message exists once per plan batch
+  if ((mode === "tools" || act.id) && act.id) {
     if (planned._assistantPushed !== true) {
       messages.push({
         role: "assistant",
@@ -225,114 +506,21 @@ function appendToolResult(messages, act, mode, planned, compact) {
     messages.push({
       role: "tool",
       tool_call_id: act.id,
+      name: act.action,
       content: JSON.stringify(compact),
     });
   } else {
     messages.push({
       role: "assistant",
-      content: JSON.stringify({ action: act.action, args: redactArgs(act.args) }),
+      content: JSON.stringify({
+        thought: act.thought || planned.thinking || "",
+        action: act.action,
+        args: redactArgs(act.args),
+      }),
     });
     messages.push({
       role: "user",
-      content: `관찰(JSON): ${JSON.stringify(compact)}\n다음 액션 JSON을 한 줄로.`,
+      content: `관찰(JSON): ${JSON.stringify(compact)}\n다음 액션 JSON을 한 줄로 (thought 포함).`,
     });
   }
-}
-
-async function planNext({ env, messages, mode }) {
-  if (!env.GROQ_API_KEY) {
-    return { mode: "react", actions: [], text: "", error: "no_groq_key" };
-  }
-
-  // Prefer native tools first; on empty tool_calls fall back to ReAct parse; on 400 tools → ReAct only
-  if (mode === "tools") {
-    const withTools = await groqChat(env, messages, { tools: BROWSER_TOOLS, tool_choice: "auto" });
-    if (withTools.unsupported) {
-      return planReact(env, messages);
-    }
-    if (withTools.error && !withTools.message) {
-      return { mode: "tools", actions: [], text: "", error: withTools.error };
-    }
-    const actions = normalizeToolCalls(withTools.message);
-    if (actions.length) {
-      return { mode: "tools", actions, text: withTools.message?.content || "", error: null };
-    }
-    const text = String(withTools.message?.content || "").trim();
-    const react = parseReactAction(text);
-    if (react) {
-      return { mode: "react", actions: [{ ...react, id: null }], text, error: null };
-    }
-    if (text) {
-      return { mode: "tools", actions: [], text, error: null };
-    }
-    // empty → try react prompt once
-    return planReact(env, messages);
-  }
-  return planReact(env, messages);
-}
-
-async function planReact(env, messages) {
-  const reactMessages = [
-    ...messages,
-    {
-      role: "user",
-      content:
-        '도구 JSON만 출력: {"thought":"...","action":"open|screenshot|click|type|scroll|done","args":{...}}',
-    },
-  ];
-  const res = await groqChat(env, reactMessages, {});
-  if (res.error && !res.message) {
-    return { mode: "react", actions: [], text: "", error: res.error };
-  }
-  const text = String(res.message?.content || "").trim();
-  const react = parseReactAction(text);
-  if (react) {
-    return { mode: "react", actions: [{ ...react, id: null }], text, error: null };
-  }
-  return { mode: "react", actions: [], text, error: react ? null : "no_action_parsed" };
-}
-
-async function groqChat(env, messages, extra) {
-  let lastErr = null;
-  for (const model of MODELS) {
-    const body = {
-      model,
-      messages: messages.map(sanitizeMessage),
-      temperature: 0.3,
-      max_tokens: 600,
-      ...extra,
-    };
-    const res = await fetch(GROQ_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + env.GROQ_API_KEY,
-      },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const msg = `groq_${res.status}:${JSON.stringify(data).slice(0, 200)}`;
-      lastErr = msg;
-      // tools not supported
-      if (extra.tools && (res.status === 400 || /tool|function|unsupported/i.test(msg))) {
-        return { unsupported: true, error: msg };
-      }
-      if (res.status === 404 || /does not exist|deprecat|not_found/i.test(msg)) {
-        continue;
-      }
-      return { error: msg };
-    }
-    return { message: data?.choices?.[0]?.message || {}, raw: data };
-  }
-  return { error: lastErr || "groq_failed" };
-}
-
-function sanitizeMessage(m) {
-  const out = { role: m.role };
-  if (m.content !== undefined) out.content = m.content;
-  if (m.tool_calls) out.tool_calls = m.tool_calls;
-  if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
-  if (m.name) out.name = m.name;
-  return out;
 }

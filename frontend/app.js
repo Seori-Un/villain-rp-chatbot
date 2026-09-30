@@ -15,6 +15,8 @@ const browseGoal = document.getElementById("browseGoal");
 const browseRun = document.getElementById("browseRun");
 const browseStatus = document.getElementById("browseStatus");
 const browseSteps = document.getElementById("browseSteps");
+const browseThinking = document.getElementById("browseThinking");
+const browseThinkMeta = document.getElementById("browseThinkMeta");
 const browseShotWrap = document.getElementById("browseShotWrap");
 const browseShot = document.getElementById("browseShot");
 
@@ -133,32 +135,72 @@ function formatArgs(args) {
     parts.push(t === "***" ? "***" : t.slice(0, 40));
   }
   if (args.direction) parts.push(String(args.direction));
-  if (args.summary) parts.push(String(args.summary).slice(0, 60));
+  if (args.summary) parts.push(String(args.summary).slice(0, 80));
   if (args.x != null && args.y != null) parts.push(`(${args.x},${args.y})`);
   return parts.join(" · ");
 }
 
-function renderSteps(steps) {
+/** Render Claude-style timeline: think / tool / observe */
+function renderSteps(steps, meta) {
   browseSteps.innerHTML = "";
-  if (!Array.isArray(steps) || !steps.length) return;
+  if (!Array.isArray(steps) || !steps.length) {
+    browseThinkMeta.textContent = "";
+    return;
+  }
+  const thinks = steps.filter((s) => (s.type || inferType(s)) === "think").length;
+  const tools = steps.filter((s) => (s.type || inferType(s)) === "tool").length;
+  const llmBit = meta?.llm ? ` · ${meta.llm}` : "";
+  const modelBit = meta?.model ? `/${meta.model}` : "";
+  browseThinkMeta.textContent = `${thinks}생각 · ${tools}도구${llmBit}${modelBit}`;
+
   for (const s of steps) {
+    const type = s.type || inferType(s);
     const li = document.createElement("li");
     const ok = s.ok !== false;
-    li.className = ok ? "step-ok" : "step-fail";
-    const tool = s.tool || s.action || "?";
-    const label = TOOL_KO[tool] || tool;
-    const detail = formatArgs(s.args) || s.message || s.error || "";
-    const obs = s.observation;
-    const obsBit =
-      obs && (obs.title || obs.url)
-        ? ` → ${(obs.title || "").slice(0, 40)}${obs.url ? " · " + String(obs.url).slice(0, 48) : ""}`
-        : "";
+    li.className = `step-${type}` + (type === "tool" ? (ok ? " step-ok" : " step-fail") : "");
+
+    let label = "";
+    let body = "";
+    if (type === "think") {
+      label = "생각";
+      body = s.content || "";
+    } else if (type === "observe") {
+      label = "관찰";
+      body = s.content || formatObserve(s.observation) || "";
+    } else {
+      const tool = s.tool || s.action || "?";
+      label = TOOL_KO[tool] || tool;
+      body =
+        s.content ||
+        formatArgs(s.args) ||
+        s.message ||
+        s.error ||
+        "";
+      const obs = s.observation;
+      if (obs && (obs.title || obs.url) && !s.content) {
+        body += ` → ${(obs.title || "").slice(0, 40)}${obs.url ? " · " + String(obs.url).slice(0, 48) : ""}`;
+      }
+    }
     li.innerHTML =
-      `<span class="step-tool">${s.n != null ? s.n + ". " : ""}${label}</span> ` +
-      escapeHtml(detail + obsBit);
+      `<span class="step-label">${escapeHtml(label)}</span>` + escapeHtml(body);
     browseSteps.appendChild(li);
   }
   browseSteps.scrollTop = browseSteps.scrollHeight;
+  if (browseThinking) browseThinking.open = true;
+}
+
+function inferType(s) {
+  if (s.tool || s.action) return "tool";
+  if (s.observation && !s.content) return "observe";
+  return "think";
+}
+
+function formatObserve(obs) {
+  if (!obs) return "";
+  const bits = [];
+  if (obs.title) bits.push(String(obs.title).slice(0, 60));
+  if (obs.url) bits.push(String(obs.url).slice(0, 60));
+  return bits.join(" · ");
 }
 
 function escapeHtml(str) {
@@ -186,7 +228,6 @@ function extractScreenshot(data) {
   for (const c of candidates) {
     if (!c || typeof c !== "string") continue;
     if (/^https?:\/\//i.test(c) || c.startsWith("data:image")) return c;
-    // raw base64 png/jpeg
     if (/^[A-Za-z0-9+/=\s]+$/.test(c) && c.replace(/\s/g, "").length > 80) {
       return "data:image/png;base64," + c.replace(/\s/g, "");
     }
@@ -226,13 +267,16 @@ async function runBrowse() {
     return;
   }
   browseRun.disabled = true;
-  setBrowseStatus("running", "실행 중…");
+  setBrowseStatus("running", "생각·탐색 중…");
   browseSteps.innerHTML = "";
+  browseThinkMeta.textContent = "진행 중";
+  if (browseThinking) browseThinking.open = true;
   showScreenshot(null);
 
   addBubble(`〔웹〕 ${goal}`, "user");
-  const pending = addBubble("웹 심부름 가는 중…", "browse");
+  const pending = addBubble("웹 심부름 가는 중… (생각 과정은 위 패널)", "browse");
 
+  const t0 = performance.now();
   try {
     const res = await fetch(`${API_BASE}/browse`, {
       method: "POST",
@@ -240,22 +284,23 @@ async function runBrowse() {
       body: JSON.stringify({
         goal,
         session_id: sessionId || undefined,
-        max_steps: 8,
+        max_steps: 12,
       }),
     });
     const data = await res.json().catch(() => ({}));
+    const ms = Math.round(performance.now() - t0);
     if (data.session_id) {
       sessionId = data.session_id;
       persist();
     }
-    renderSteps(data.steps);
+    renderSteps(data.steps, { llm: data.llm, model: data.model });
     showScreenshot(extractScreenshot(data));
 
     const reply =
       data.reply ||
       data.error ||
       (res.ok ? "끝났어." : "실패했어.");
-    pending.textContent = reply;
+    pending.textContent = reply + `\n(${ms}ms · ${data.llm || "?"}${data.model ? " / " + data.model : ""})`;
     if (!res.ok || data.ok === false) {
       pending.classList.add("err");
       setBrowseStatus("error", data.error === "browser_not_configured" ? "미연결" : "오류");
@@ -267,7 +312,7 @@ async function runBrowse() {
           ? `\n(확인: ${data.needs_confirm.reason})`
           : "\n(로그인/비밀번호 등 확인이 필요해)");
     } else {
-      setBrowseStatus("done", "완료");
+      setBrowseStatus("done", `완료 ${Math.round(ms / 1000)}s`);
     }
   } catch (err) {
     pending.textContent = "웹 연결이 안 되네. " + String(err.message || err);
