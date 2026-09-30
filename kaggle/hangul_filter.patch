@@ -1,0 +1,13 @@
+diff --git a/rag_chatbot/core/ingestion/ingestion.py b/rag_chatbot/core/ingestion/ingestion.py
+index a28781f..891d958 100644
+--- a/rag_chatbot/core/ingestion/ingestion.py
++++ b/rag_chatbot/core/ingestion/ingestion.py
+@@ -19,7 +19,7 @@ class LocalDataIngestion:
+ 
+     def _filter_text(self, text):
+         # Define the regex pattern.
+-        pattern = r'[a-zA-Z0-9 \u00C0-\u01B0\u1EA0-\u1EF9`~!@#$%^&*()_\-+=\[\]{}|\\;:\'",.<>/?]+'
++        pattern = r'[a-zA-Z0-9 \u00C0-\u01B0\u1EA0-\u1EF9\u1100-\u11FF\u3130-\u318F\uAC00-\uD7A3`~!@#$%^&*()_\-+=\[\]{}|\\;:\'\",.<>/?·…‘’“”～、。？！]+'
+         matches = re.findall(pattern, text)
+         # Join all matched substrings into a single string
+         filtered_text = " ".join(matches)
