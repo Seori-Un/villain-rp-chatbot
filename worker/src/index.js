@@ -10,6 +10,11 @@
 import { classifyIntent, normalizeUtterance } from "./intent.js";
 import { handleBrowse, browserHealth } from "./browser/index.js";
 import { routeAgentMode, stripWebPrefix } from "./task.js";
+import {
+  resolveTimeContext,
+  formatTimePromptBlock,
+  maybeBoostLateIntent,
+} from "./time.js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -41,7 +46,7 @@ async function handleRequest(request, env) {
       return json({
         ok: true,
         bot: "채티",
-        version: "secretary-v1.1-browse-timeout",
+        version: "secretary-v1.2-time-sense",
         chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
@@ -201,7 +206,8 @@ async function handleChat(request, env) {
     });
   }
 
-  const reply = await bot.turn(message, env);
+  const timeCtx = resolveTimeContext(body, bot.lastMessageAt);
+  const reply = await bot.turn(message, env, timeCtx);
   return json({
     reply,
     session_id: sessionId,
@@ -209,6 +215,7 @@ async function handleChat(request, env) {
     snapshot: bot.serialize(),
     intent: bot.lastIntent,
     mode: bot.gen.mode,
+    time: { tz: timeCtx.tz, now: timeCtx.now, gap_ms: timeCtx.gapMs },
   });
 }
 
@@ -647,7 +654,7 @@ class ResponseGenerator {
       seed
     );
   }
-  buildSystemPrompt(agent, memories, intent) {
+  buildSystemPrompt(agent, memories, intent, timeCtx) {
     const memTxt =
       memories.map((m) => `- ${m.text} (${m.valence > 0 ? "좋게 남은" : "서운하게 남은"})`).join("\n") ||
       "- (아직 선명한 장면 없음)";
@@ -655,6 +662,7 @@ class ResponseGenerator {
       .map((x) => `- ${x}`)
       .join("\n");
     const last = agent.log[agent.log.length - 1] || {};
+    const timeBlock = formatTimePromptBlock(timeCtx);
     const intentGuide = {
       reject:
         "상대가 연락을 줄이거나 거리를 두자고 함. 상처·매달림·반추·거절 부정. 절대 쿨하게 동의만 하지 말 것.",
@@ -684,6 +692,7 @@ class ResponseGenerator {
 ${dirs}
 기억:
 ${memTxt}
+${timeBlock ? "\n" + timeBlock : ""}
 
 규칙: 2~6문장 한국어 반말. 반드시 intent=${intent}에 맞게 반응.`;
   }
@@ -695,10 +704,10 @@ ${memTxt}
     );
   }
   /** Claude Sonnet — same model list as browse (no tools / no extended thinking for RP speed). */
-  async claude(userText, agent, memories, intent, env) {
+  async claude(userText, agent, memories, intent, env, timeCtx) {
     const apiKey = this.anthropicKey(env);
     if (!apiKey) throw new Error("no_anthropic");
-    const sys = this.buildSystemPrompt(agent, memories, intent);
+    const sys = this.buildSystemPrompt(agent, memories, intent, timeCtx);
     const messages = [];
     for (const m of this.history.slice(-10)) {
       const role = m.role === "assistant" ? "assistant" : "user";
@@ -794,8 +803,8 @@ ${memTxt}
     }
     throw lastErr || new Error("empty_claude");
   }
-  async groq(userText, agent, memories, intent, env) {
-    const sys = this.buildSystemPrompt(agent, memories, intent);
+  async groq(userText, agent, memories, intent, env, timeCtx) {
+    const sys = this.buildSystemPrompt(agent, memories, intent, timeCtx);
     const messages = [{ role: "system", content: sys }];
     for (const m of this.history.slice(-10)) {
       messages.push({
@@ -849,8 +858,8 @@ ${memTxt}
     }
     throw lastErr || new Error("empty_groq");
   }
-  async gemini(userText, agent, memories, intent, env) {
-    const sys = this.buildSystemPrompt(agent, memories, intent);
+  async gemini(userText, agent, memories, intent, env, timeCtx) {
+    const sys = this.buildSystemPrompt(agent, memories, intent, timeCtx);
     const contents = [];
     for (const m of this.history.slice(-10)) {
       contents.push({
@@ -881,7 +890,7 @@ ${memTxt}
     if (!out) throw new Error("empty_gemini");
     return out;
   }
-  async reply(userText, agent, intent, env) {
+  async reply(userText, agent, intent, env, timeCtx) {
     const memories = this.salient(agent);
     let out;
     const banned =
@@ -890,7 +899,7 @@ ${memTxt}
 
     const tryGemini = async () => {
       try {
-        out = await this.gemini(userText, agent, memories, intent, env);
+        out = await this.gemini(userText, agent, memories, intent, env, timeCtx);
         this.mode = fellFrom ? "gemini_fallback" : "gemini";
         this.lastError = null;
         return true;
@@ -900,7 +909,7 @@ ${memTxt}
         if (retryable) {
           try {
             await new Promise((r) => setTimeout(r, 400));
-            out = await this.gemini(userText, agent, memories, intent, env);
+            out = await this.gemini(userText, agent, memories, intent, env, timeCtx);
             this.mode = fellFrom ? "gemini_fallback" : "gemini";
             this.lastError = null;
             return true;
@@ -917,7 +926,7 @@ ${memTxt}
     const tryGroq = async () => {
       if (!env.GROQ_API_KEY) return false;
       try {
-        out = await this.groq(userText, agent, memories, intent, env);
+        out = await this.groq(userText, agent, memories, intent, env, timeCtx);
         this.mode = fellFrom ? "groq_fallback" : "groq";
         this.lastError = null;
         return true;
@@ -931,7 +940,7 @@ ${memTxt}
     const hasClaude = Boolean(this.anthropicKey(env));
     if (hasClaude) {
       try {
-        out = await this.claude(userText, agent, memories, intent, env);
+        out = await this.claude(userText, agent, memories, intent, env, timeCtx);
         this.mode = "claude";
         this.lastError = null;
         usedLlm = true;
@@ -988,30 +997,39 @@ class ObsessionChatbot {
     this.gen = new ResponseGenerator();
     this.episodes = [];
     this.lastIntent = "chat";
+    /** @type {number} epoch ms of last user/assistant turn (for gap) */
+    this.lastMessageAt = 0;
   }
   inferEvent(text, intent) {
     if (!String(text || "").trim() || intent === "silence") return "ignore";
     if (intent === "reject") return "reject";
     return "reply";
   }
-  async turn(text, env) {
-    const intent = classifyIntent(text);
+  async turn(text, env, timeCtx) {
+    let intent = classifyIntent(text);
+    if (timeCtx) intent = maybeBoostLateIntent(intent, timeCtx.gapMs);
     this.lastIntent = intent;
     const event = this.inferEvent(text, intent);
     const rec = this.agent.step(text, event);
     this.episodes.push({ t: rec.t, text: text || "(응답 없음)", event: rec.event, intent, valence: rec.rpe });
-    return this.gen.reply(text, this.agent, intent, env);
+    const out = await this.gen.reply(text, this.agent, intent, env, timeCtx);
+    this.lastMessageAt = (timeCtx && timeCtx.now) || Date.now();
+    return out;
   }
   serialize() {
     return {
       agent: this.agent.exportState(),
       history: this.gen.history.slice(-24),
       episodes: this.episodes.slice(-40),
+      lastMessageAt: this.lastMessageAt || 0,
     };
   }
   restore(snap) {
     if (snap.agent) this.agent.importState(snap.agent);
     if (Array.isArray(snap.history)) this.gen.history = snap.history.slice(-24);
     if (Array.isArray(snap.episodes)) this.episodes = snap.episodes.slice(-40);
+    if (typeof snap.lastMessageAt === "number" && snap.lastMessageAt > 0) {
+      this.lastMessageAt = snap.lastMessageAt;
+    }
   }
 }

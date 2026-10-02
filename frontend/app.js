@@ -39,6 +39,22 @@ let pendingBrowseConfirm = null;
 const BROWSE_TIMEOUT_MS = 150000; // 150s — generous but before silent drop
 const CHAT_TIMEOUT_MS = 90000;
 const BROWSE_MAX_STEPS = 8; // shorter Worker wall time by default
+
+
+/* ---------- time sense (client clock → Worker system prompt) ---------- */
+function clientTimePayload() {
+  let tz = "Asia/Seoul";
+  try {
+    tz = Intl.DateTimeFormat().resolvedOptions().timeZone || tz;
+  } catch {}
+  const last = [...messages].reverse().find((m) => typeof m.ts === "number" && m.ts > 0);
+  return {
+    client_now: Date.now(),
+    timezone: tz,
+    last_message_at: last ? last.ts : undefined,
+  };
+}
+
 const BROWSE_PROGRESS_MS = 2500;
 
 const TOOL_KO = {
@@ -161,7 +177,7 @@ function loadStore() {
       legacy.messages = hist
         .filter((t) => t?.role && t?.content)
         .slice(-40)
-        .map((t) => ({ role: t.role, content: t.content, kind: "chat" }));
+        .map((t) => ({ role: t.role, content: t.content, kind: "chat", ts: t.ts }));
     }
   } catch {}
   return legacy;
@@ -184,7 +200,11 @@ function persist() {
     if (snapshot) localStorage.setItem("chaeti_snapshot", JSON.stringify(snapshot));
     const hist = messages
       .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }))
+      .map((m) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: m.content,
+        ts: m.ts,
+      }))
       .slice(-40);
     localStorage.setItem("chaeti_history", JSON.stringify(hist));
   } catch (e) {
@@ -456,9 +476,11 @@ form.addEventListener("submit", async (e) => {
 });
 
 async function runChatTurn(message) {
+  // Capture gap vs previous message BEFORE pushing this turn's user bubble.
+  const timePayload = clientTimePayload();
   addBubble(message === "/silence" ? "(침묵)" : message, "user");
   if (!message.startsWith("/")) {
-    messages.push({ role: "user", content: message, kind: "chat" });
+    messages.push({ role: "user", content: message, kind: "chat", ts: Date.now() });
   }
   const btn = form.querySelector("button");
   btn.disabled = true;
@@ -476,10 +498,13 @@ async function runChatTurn(message) {
             .map((m) => ({
               role: m.role === "assistant" || m.role === "bot" ? "assistant" : "user",
               content: m.content,
+              ts: m.ts,
             }))
             .slice(-24),
           session_id: sessionId || undefined,
           snapshot: snapshot || undefined,
+          ...timePayload,
+          client_now: Date.now(),
         }),
       },
       CHAT_TIMEOUT_MS
@@ -495,9 +520,9 @@ async function runChatTurn(message) {
       snapshot = data.snapshot || null;
       log.innerHTML = "";
       addBubble(reply, "bot");
-      messages.push({ role: "assistant", content: reply, kind: "chat" });
+      messages.push({ role: "assistant", content: reply, kind: "chat", ts: Date.now() });
     } else if (!message.startsWith("/")) {
-      messages.push({ role: "assistant", content: reply, kind: "chat" });
+      messages.push({ role: "assistant", content: reply, kind: "chat", ts: Date.now() });
     }
     persist();
   } catch (err) {

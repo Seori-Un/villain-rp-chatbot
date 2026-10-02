@@ -30,6 +30,12 @@ https://www.kaggle.com/code/seoriun/notebookf32ae7a716/edit
 
 강제 웹: 메시지 앞에 `/웹 ` 접두사.
 
+### 시간 감각 (v1.2)
+매 `/chat` 턴에 프론트가 `client_now`·`timezone`(브라우저 TZ)·`last_message_at`을 보냅니다.
+Worker가 시스템 프롬프트에 **지금(유저 기준)**·**이전 메시지 간격**·아침/낮/저녁/밤을 넣고,
+간격이 6시간 이상이면 `chat`/`ask` 의도를 `late`로 살짝 올립니다.
+스냅샷에 `lastMessageAt`도 저장됩니다. 시계 숫자를 읽게 하지 않고 말투에만 녹이도록 가이드합니다.
+
 ### 로컬 저장 (localStorage `chaeti_v3`)
 - 대화 메시지, 마지막 browse step 요약, `session_id`, RP `snapshot`, 모드
 - **비밀번호·쿠키·브라우저 탭 상태는 저장하지 않음** (러너/Worker 메모리만)
