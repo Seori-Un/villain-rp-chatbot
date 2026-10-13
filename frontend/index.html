@@ -5,11 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>채티</title>
   <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="apple-touch-icon" href="chaeti-avatar.png" />
 </head>
 <body>
   <div class="app face-first text-hidden">
     <header>
-      <div class="mark">채</div>
+      <div class="mark"><img src="chaeti-avatar.png" alt="채티" /></div>
       <div class="header-text">
         <h1>채티</h1>
         <p class="sub" id="headerSub">말 걸면 돼 · 검색·웹·기억·코딩 다 내가 해</p>
@@ -28,36 +30,53 @@
     <section id="livePanel" class="live-panel" hidden aria-label="채티 얼굴">
       <svg id="faceSvg" class="face" viewBox="0 0 240 200" data-emotion="calm" aria-hidden="true">
         <defs>
-          <radialGradient id="faceGrad" cx="50%" cy="40%" r="70%">
-            <stop offset="0%" stop-color="#2a2018"/>
-            <stop offset="100%" stop-color="#141416"/>
+          <radialGradient id="faceGrad" cx="45%" cy="38%" r="70%">
+            <stop offset="0%" stop-color="#fffaf4"/>
+            <stop offset="100%" stop-color="#ffe4d6"/>
+          </radialGradient>
+          <radialGradient id="irisGrad" cx="50%" cy="35%" r="65%">
+            <stop offset="0%" stop-color="#9b6fd6"/>
+            <stop offset="100%" stop-color="#3b2a4a"/>
           </radialGradient>
         </defs>
-        <circle class="head" cx="120" cy="100" r="88" fill="url(#faceGrad)"/>
+        <g class="ears">
+          <path class="ear" d="M44 70 Q34 22 76 38 Z"/>
+          <path class="ear" d="M196 70 Q206 22 164 38 Z"/>
+          <path class="ear-in" d="M50 62 Q46 34 70 42 Z"/>
+          <path class="ear-in" d="M190 62 Q194 34 170 42 Z"/>
+        </g>
+        <ellipse class="head" cx="120" cy="108" rx="90" ry="82" fill="url(#faceGrad)"/>
+        <path class="tuft" d="M112 30 Q106 12 122 8 Q114 18 126 22 Q136 14 134 30 Z"/>
         <g class="blush">
-          <ellipse cx="68" cy="122" rx="16" ry="8"/>
-          <ellipse cx="172" cy="122" rx="16" ry="8"/>
+          <ellipse cx="62" cy="130" rx="17" ry="10"/>
+          <ellipse cx="178" cy="130" rx="17" ry="10"/>
         </g>
         <g class="brows">
-          <path class="brow brow-l" d="M62 66 Q80 56 100 64"/>
-          <path class="brow brow-r" d="M140 64 Q160 56 178 66"/>
+          <path class="brow brow-l" d="M64 64 Q78 58 94 62"/>
+          <path class="brow brow-r" d="M146 62 Q162 58 176 64"/>
         </g>
         <g class="eyes">
           <g class="eye eye-l">
-            <ellipse class="white" cx="82" cy="92" rx="18" ry="14"/>
-            <circle class="pupil" cx="82" cy="92" r="7"/>
-            <circle class="glint" cx="86" cy="88" r="2"/>
-            <rect class="lid" x="62" y="76" width="40" height="0"/>
+            <ellipse class="white" cx="80" cy="100" rx="21" ry="24"/>
+            <circle class="pupil" cx="80" cy="102" r="15"/>
+            <circle class="glint" cx="86" cy="93" r="5"/>
+            <circle class="glint2" cx="74" cy="110" r="2.4"/>
+            <rect class="lid" x="56" y="74" width="48" height="0"/>
           </g>
           <g class="eye eye-r">
-            <ellipse class="white" cx="158" cy="92" rx="18" ry="14"/>
-            <circle class="pupil" cx="158" cy="92" r="7"/>
-            <circle class="glint" cx="162" cy="88" r="2"/>
-            <rect class="lid" x="138" y="76" width="40" height="0"/>
+            <ellipse class="white" cx="160" cy="100" rx="21" ry="24"/>
+            <circle class="pupil" cx="160" cy="102" r="15"/>
+            <circle class="glint" cx="166" cy="93" r="5"/>
+            <circle class="glint2" cx="154" cy="110" r="2.4"/>
+            <rect class="lid" x="136" y="74" width="48" height="0"/>
           </g>
         </g>
+        <g class="sparkles">
+          <path d="M28 104 l3 -8 l3 8 l8 3 l-8 3 l-3 8 l-3 -8 l-8 -3 Z"/>
+          <path d="M206 92 l2 -6 l2 6 l6 2 l-6 2 l-2 6 l-2 -6 l-6 -2 Z"/>
+        </g>
         <path class="mouth" d="M96 140 Q120 150 144 140"/>
-        <ellipse class="mouth-open" cx="120" cy="144" rx="12" ry="0"/>
+        <ellipse class="mouth-open" cx="120" cy="144" rx="9" ry="0"/>
       </svg>
       <p id="faceCaption" class="face-caption">평온</p>
       <video id="camVideo" class="cam-video" playsinline muted></video>
@@ -86,7 +105,7 @@
   </div>
   <div id="startOverlay" class="start-overlay">
     <button type="button" id="startBtn" class="start-btn">
-      <span class="start-mark">채</span>
+      <span class="start-mark"><img src="chaeti-avatar.png" alt="" /></span>
       <span>탭해서 채티 깨우기</span>
       <small>얼굴 + 음성으로 시작해 (마이크 권한 필요)</small>
     </button>
