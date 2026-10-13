@@ -51,22 +51,33 @@ function lev(a, b) {
 }
 
 /* ---------- 이 사람의 단어장 ---------- */
-const STOP = new Set(["그리고", "그런데", "하지만", "근데", "오늘", "어제", "내일", "지금", "진짜", "그냥", "이거", "그거", "저거", "뭐야", "있어", "없어", "채티", "우리", "사람"]);
+const STOP = new Set(["그리고", "그런데", "하지만", "근데", "오늘", "어제", "내일", "지금", "진짜", "그냥", "이거", "그거", "저거", "뭐야", "있어", "없어", "채티", "우리", "사람", "같애", "같아", "곁에", "항상", "언제나", "정말", "너무", "조금", "많이", "다시", "아직", "벌써", "이제", "여기", "거기", "저기", "오늘은", "내가", "네가", "니가", "나도", "너도", "우리가", "그래", "응응", "아니", "몰라", "좋아", "싫어", "보고", "싶어", "해줘", "할게", "했어", "하자", "했지", "거야", "건데", "는데", "니까", "잖아", "그치", "맞아", "그럼", "근데", "혹시", "약간", "되게", "완전", "제일", "가장", "매일", "요즘", "나중에", "먼저", "같이", "혼자", "둘이", "오늘도", "하루", "시간", "생각", "마음", "기분", "얘기", "이야기", "말", "집", "일", "밥", "잠", "꿈"]);
+/** everyday-Korean shapes that are never "the user's own words": verb/adjective endings, particles glued on */
+const COMMON_SHAPE = /(어|아|해|했|할|하|야|지|네|다|요|죠|게|께|고|서|면|니|냐|까|데|든|라|래|을|를|은|는|이|가|의|에|도|만|로)$/;
+function isDistinctive(w) {
+  if (STOP.has(w)) return false;
+  if (/[A-Za-z0-9]/.test(w)) return true; // 발로란트, iOS, D1 …
+  if (w.length >= 5) return !COMMON_SHAPE.test(w) || /[A-Za-z]/.test(w);
+  // 2~4 syllables: must not look like a conjugated verb/adjective or particle-ended word
+  return !COMMON_SHAPE.test(w);
+}
 
 /** @returns {Promise<string[]>} up to ~120 distinctive words 채티 has heard from this person */
 export async function buildLexicon(env, user_id) {
   if (!memoryEnabled(env) || !user_id) return [];
   const words = new Map(); // word → weight
-  const add = (w, wt) => {
+  const add = (w, wt, force = false) => {
     w = String(w || "").trim();
-    if (w.length < 2 || w.length > 12 || STOP.has(w) || /^\d+$/.test(w)) return;
+    if (w.length < 2 || w.length > 12 || /^\d+$/.test(w)) return;
+    if (!force && !isDistinctive(w)) return;
+    if (STOP.has(w)) return;
     words.set(w, (words.get(w) || 0) + wt);
   };
   try {
     const { results: topics } = await env.DB.prepare(`SELECT name, keywords FROM topics WHERE user_id = ?1 ORDER BY updated_at DESC LIMIT 40`).bind(user_id).all();
     for (const t of topics) {
-      add(t.name, 3);
-      for (const k of String(t.keywords || "").split(/[,\s]+/)) add(k, 2);
+      add(t.name, 3, true);
+      for (const k of String(t.keywords || "").split(/[,\s]+/)) add(k, 2, true);
     }
     const { results: convs } = await env.DB.prepare(`SELECT title FROM conversations WHERE user_id = ?1 ORDER BY updated_at DESC LIMIT 60`).bind(user_id).all();
     for (const c of convs) for (const w of tokenize(c.title)) add(w, 1);
@@ -74,7 +85,7 @@ export async function buildLexicon(env, user_id) {
     const seen = new Map();
     for (const m of msgs) for (const w of tokenize(m.content)) seen.set(w, (seen.get(w) || 0) + 1);
     // words that recur across messages are "theirs": names, places, projects, slang
-    for (const [w, n] of seen) if (n >= 2) add(w, Math.min(3, n * 0.5));
+    for (const [w, n] of seen) if (n >= 3) add(w, Math.min(3, n * 0.5));
     const { results: feel } = await env.DB.prepare(`SELECT grudge, wish FROM feelings WHERE user_id = ?1`).bind(user_id).all();
     for (const f of feel) for (const w of tokenize(f.grudge + " " + f.wish)) add(w, 1);
   } catch {
@@ -99,11 +110,14 @@ export function phoneticCandidates(text, lexicon, { max = 6 } = {}) {
   const lexKeys = lexicon.map((w) => [w, soundKey(w)]);
   for (const tok of toks) {
     if (lexicon.includes(tok)) continue;
+    const ordinary = !isDistinctive(tok) && !/[A-Za-z]/.test(tok); // "곁에", "같애" 같은 보통 말
     const tk = soundKey(tok);
     for (const [w, wk] of lexKeys) {
       if (Math.abs(wk.length - tk.length) > 3) continue;
       const d = lev(tk, wk);
       const limit = tk.length <= 4 ? 1 : tk.length <= 7 ? 2 : 3;
+      // an ordinary-looking word is only a candidate when it sounds *identical* to a known name (모지→모찌)
+      if (ordinary && d > 0) continue;
       if (d <= limit && tok !== w) out.push({ heard: tok, maybe: w, d });
     }
   }
@@ -130,7 +144,8 @@ const REPAIR_SYSTEM = `너는 채티의 귀다. 음성 인식기가 적어 준 �
 음성 인식은 비슷한 발음(ㅐ/ㅔ, 된소리, 받침), 띄어쓰기, 고유명사(이름·장소·앱·게임·프로젝트), 영어 단어를 자주 틀린다.
 단서: 다른 인식 후보들, 이 사람이 자주 쓰는 단어(lexicon), 비슷하게 들리는 아는 단어(candidates), 직전 대화.
 원칙:
-- 말이 자연스럽게 통하면 그대로 둔다 (고치지 않는 게 기본).
+- 말이 자연스럽게 통하면 그대로 둔다 (고치지 않는 게 기본). 원문이 멀쩡한 한국어 문장이면 repaired=false — 더 그럴듯한 다른 문장이 떠올라도 바꾸지 않는다.
+- 고치는 건 원문이 말이 안 되거나(문법·의미가 깨짐), 고유명사가 엉뚱하게 들렸을 때뿐이다. 보통 단어를 다른 보통 단어로 바꾸지 않는다.
 - 확실히 더 말이 되는 복원이 있으면 고친다. 특히 lexicon에 있는 단어로 바뀌면 적극적으로.
 - 복원이 둘 이상이고 뜻이 크게 갈리면 고치지 말고 ask에 되물을 짧은 질문을 쓴다 ("OO라고 한 거야?").
 JSON만: {"text":"복원한 문장(또는 원문)","repaired":true|false,"confidence":0~1,"ask":"","note":"무엇을 왜 고쳤는지 한 줄"}`;
@@ -160,10 +175,12 @@ export async function repairHearing(env, { text, alternatives = [], confidence =
     .filter(Boolean)
     .join("\n");
   try {
-    const out = await completeText(env, { system: REPAIR_SYSTEM, user, maxTokens: 220, temperature: 0.1, timeoutMs: 9000 });
+    const out = await completeText(env, { system: REPAIR_SYSTEM, user, maxTokens: 220, temperature: 0.1, timeoutMs: 14000 });
     const obj = extractFirstJsonObject(out.text) || {};
     const fixed = String(obj.text || raw).trim() || raw;
-    const repaired = Boolean(obj.repaired) && fixed !== raw;
+    let repaired = Boolean(obj.repaired) && fixed !== raw;
+    // sanity: a repair must keep most of the sentence and must not just swap ordinary words around
+    if (repaired && !plausibleRepair(raw, fixed, lexicon)) repaired = false;
     return {
       text: repaired ? fixed : raw,
       repaired,
@@ -173,9 +190,26 @@ export async function repairHearing(env, { text, alternatives = [], confidence =
       candidates,
     };
   } catch {
-    // no LLM → apply only the safest phonetic fix (distance 1 to a strong lexicon word)
-    let fixed = raw;
-    for (const c of candidates) if (c.d === 1) fixed = fixed.replace(c.heard, c.maybe);
-    return { ...base, text: fixed, repaired: fixed !== raw, note: fixed !== raw ? "아는 단어로 바꿔 들음" : "", candidates };
+    // no LLM available → never guess; leave the sentence exactly as heard
+    return { ...base, candidates };
   }
+}
+
+/**
+ * A repair is plausible only if it is a small edit and every changed word is either
+ * (a) a lexicon word (the whole point) or (b) a sound-alike of what was heard.
+ */
+export function plausibleRepair(raw, fixed, lexicon = []) {
+  const a = tokenize(raw), b = tokenize(fixed);
+  if (!b.length) return false;
+  if (Math.abs(a.length - b.length) > 2) return false;
+  const changed = b.filter((w) => !a.includes(w));
+  if (!changed.length) return true;
+  if (changed.length > Math.max(1, Math.ceil(a.length / 3))) return false;
+  const aKeys = a.map(soundKey);
+  return changed.every((w) => {
+    if (lexicon.includes(w)) return true;
+    const wk = soundKey(w);
+    return aKeys.some((k) => lev(k, wk) <= (wk.length <= 4 ? 1 : 2));
+  });
 }

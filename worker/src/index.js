@@ -86,7 +86,7 @@ async function handleRequest(request, env, ctx) {
       return json({
         ok: true,
         bot: "채티",
-        version: "chaeti-v1.9-honest",
+        version: "chaeti-v1.9.1-hearing-fix",
         chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
@@ -345,7 +345,7 @@ async function handleChat(request, env, ctx) {
   // Stage 0: hearing — voice turns may be misrecognized; repair with this person's own vocabulary
   const userIdEarly = cleanUserId(body.user_id);
   let heard = { text: message, repaired: false, confidence: 1, ask: "", note: "" };
-  if (body.voice && message.trim() && !message.startsWith("/")) {
+  if (body.voice && !body.no_repair && message.trim() && !message.startsWith("/")) {
     const lexicon = await buildLexicon(env, userIdEarly);
     const asr = body.asr && typeof body.asr === "object" ? body.asr : {};
     heard = await repairHearing(env, {

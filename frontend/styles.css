@@ -618,3 +618,4 @@ button[type="submit"] { border-radius: 999px; background: linear-gradient(135deg
 .truth .t-supported { color: #8fcfae; }
 .truth .t-hedged, .truth .t-common { color: var(--muted); }
 .t-why { color: var(--muted); }
+.heard-undo { font-size: 0.72rem; margin-left: 0.3rem; color: #d4b896; }

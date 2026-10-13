@@ -731,6 +731,7 @@ async function runChatTurn(message, opts = {}) {
           ...live,
           voice: Boolean(opts.voice || live.voice),
           asr: opts.asr || undefined,
+          no_repair: opts.noRepair ? true : undefined,
           event: opts.event || undefined,
           client_now: Date.now(),
         }),
@@ -749,8 +750,18 @@ async function runChatTurn(message, opts = {}) {
       const bubbles = log.querySelectorAll(".bubble.user");
       const ub = bubbles[bubbles.length - 1];
       if (ub) {
-        ub.innerHTML = `<span class="heard-raw">${escapeHtml(message)}</span> → ${escapeHtml(data.heard.text)}`;
+        ub.innerHTML = `<span class="heard-raw">${escapeHtml(message)}</span> → ${escapeHtml(data.heard.text)} `;
         ub.title = "들린 말 → 이해한 말";
+        // wrong guess? one tap re-sends exactly what was heard, with repair off
+        const undo = document.createElement("button");
+        undo.type = "button";
+        undo.className = "linkish heard-undo";
+        undo.textContent = "아니, 그대로";
+        undo.addEventListener("click", () => {
+          undo.disabled = true;
+          runChatTurn(message, { voice: true, noRepair: true });
+        });
+        ub.appendChild(undo);
       }
       const last = [...messages].reverse().find((m) => m.role === "user");
       if (last && last.content === message) last.content = data.heard.text;
