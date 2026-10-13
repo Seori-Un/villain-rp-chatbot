@@ -52,8 +52,10 @@
     if (btn) btn.setAttribute("aria-pressed", on ? "true" : "false");
   }
   function rpMode() {
-    return window.Chaeti && window.Chaeti.getMode() === "rp";
+    return Boolean(window.Chaeti); // v1.6: single persona, always on
   }
+  /** text panel asked for typed input (URL/long text) → keep the mic quiet until it's done */
+  let micPaused = false;
 
   /* =====================================================================
    * ① 얼굴 표정
@@ -175,7 +177,18 @@
 
   /** strip emoji / stage directions / markdown so TTS reads clean Korean */
   function cleanForSpeech(text) {
-    return String(text || "")
+    let t = String(text || "");
+    // code blocks are never read aloud
+    t = t.replace(/```[\s\S]*?```/g, " ");
+    // "짧은 말 \n\n 상세(코드·링크·목록)" convention: read only the spoken lead when the tail is text-only content
+    const cut = t.indexOf("\n\n");
+    if (cut > 0) {
+      const tail = t.slice(cut);
+      if (/https?:\/\/|^\s*(?:[-*•]|\d+[.)])\s/m.test(tail) || tail.length > 300) t = t.slice(0, cut);
+    }
+    t = t.replace(/https?:\/\/\S+/g, "링크");
+    if (t.length > 600) t = t.slice(0, 600);
+    return t
       .replace(/\([^)]*\)|（[^）]*）|\[[^\]]*\]|\*[^*]*\*/g, " ") // (지문) [..] *action*
       .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/gu, "")
       .replace(/[#*_`>~|]/g, "")
@@ -231,7 +244,7 @@
   }
 
   function listenOnce() {
-    if (!st.voice || st.speaking || st.busy || !SPEECH.Rec) return;
+    if (!st.voice || st.speaking || st.busy || micPaused || !SPEECH.Rec) return;
     stopListening();
     const r = new SPEECH.Rec();
     rec = r;
@@ -608,22 +621,61 @@
         });
       }
     },
-    onModeChange(mode) {
-      const rp = mode === "rp";
-      panel.classList.toggle("rp", rp);
-      for (const b of [btnFace, btnVoice, btnCam]) if (b) b.hidden = !rp;
-      if (!rp) {
-        if (st.voice) setVoice(false);
-        if (st.cam) setCam(false);
-        if (st.face) setFace(false);
-        panel.hidden = true;
+    onModeChange() {
+      panel.classList.add("rp");
+      for (const b of [btnFace, btnVoice, btnCam]) if (b) b.hidden = false;
+    },
+    isVoiceOn: () => st.voice,
+    /** app.js: text panel opened/closed; needInput pauses listening so typing isn't transcribed over */
+    onTextPanel(open, needInput) {
+      const pause = Boolean(open && needInput);
+      if (pause === micPaused) return;
+      micPaused = pause;
+      if (pause) {
+        stopListening();
+        if (st.voice) setStatus("입력창에 붙여 넣는 동안 마이크는 잠깐 쉴게", "busy");
+      } else if (st.voice && !st.busy) {
+        restartTimer = setTimeout(listenOnce, 300);
+      }
+    },
+    /** start overlay → face + voice with the user gesture the browser needs */
+    startDefault(withVoice) {
+      setFace(true);
+      if (withVoice) setVoice(true);
+      else if (window.Chaeti) window.Chaeti.openText({ focus: true });
+      if (!withVoice || !st.voice) {
+        // voice unavailable / declined → text is the way in
+        if (window.Chaeti) window.Chaeti.openText({ focus: true });
       }
     },
   };
 
+  /* ---------- start overlay (face + voice is the default screen) ---------- */
+  const overlay = $("startOverlay");
+  const startBtn = $("startBtn");
+  const startText = $("startText");
+  if (overlay) {
+    if (!SPEECH.Rec) {
+      const small = startBtn && startBtn.querySelector("small");
+      if (small) small.textContent = "이 브라우저는 음성 인식이 안 돼서 얼굴 + 글로 시작해";
+    }
+    const go = (withVoice) => {
+      overlay.classList.add("gone");
+      setTimeout(() => overlay.remove(), 400);
+      window.ChaetiLive.startDefault(withVoice);
+    };
+    if (startBtn) startBtn.addEventListener("click", () => go(Boolean(SPEECH.Rec)));
+    if (startText) startText.addEventListener("click", () => go(false));
+  }
+
   /* ---------- buttons ---------- */
   if (btnFace) btnFace.addEventListener("click", () => setFace(!st.face));
-  if (btnVoice) btnVoice.addEventListener("click", () => setVoice(!st.voice));
+  if (btnVoice)
+    btnVoice.addEventListener("click", () => {
+      setVoice(!st.voice);
+      // voice off → the text panel is the only way to talk
+      if (!st.voice && window.Chaeti) window.Chaeti.openText({ focus: true });
+    });
   if (btnCam) btnCam.addEventListener("click", () => setCam(!st.cam));
 
   // pause mic/TTS when the tab goes to background (tablet lock, app switch)

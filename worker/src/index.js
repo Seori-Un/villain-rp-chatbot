@@ -16,7 +16,7 @@ import {
   formatTimePromptBlock,
   maybeBoostLateIntent,
 } from "./time.js";
-import { planTurn, runPlanResearch, formatPlanBlock, summarizeRawThinking } from "./think.js";
+import { planTurn, runPlanResearch, formatPlanBlock, summarizeRawThinking, decideUi } from "./think.js";
 import {
   memoryEnabled,
   cleanUserId,
@@ -75,7 +75,7 @@ async function handleRequest(request, env, ctx) {
       return json({
         ok: true,
         bot: "채티",
-        version: "secretary-v1.5-memory",
+        version: "chaeti-v1.6-face-first",
         chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
@@ -324,7 +324,8 @@ async function handleChat(request, env, ctx) {
   const timeCtx = resolveTimeContext(body, bot.lastMessageAt);
 
   // Stage 1: think (plan) → Stage 1.5: web if needed → Stage 2: answer
-  const uiMode = String(body.ui_mode || body.mode || "rp").toLowerCase() === "secretary" ? "secretary" : "rp";
+  // v1.6: single persona — 채티(RP) does everything (secretary abilities included). ui_mode is ignored.
+  const uiMode = "rp";
   const think = env.CHAT_THINK !== "0" && !timeCtx.event;
   const plan = think
     ? await planTurn(env, { userText: message, history: bot.gen.history, mode: uiMode, timeHint: formatKoreanTime(timeCtx.now, timeCtx.tz) })
@@ -343,7 +344,7 @@ async function handleChat(request, env, ctx) {
       mem.error = String(e && e.message ? e.message : e).slice(0, 120);
     }
   }
-  const extra = { planBlock: formatPlanBlock(plan), webBlock: web.block, memoryBlock: mem.block, uiMode };
+  const extra = { planBlock: formatPlanBlock(plan), webBlock: web.block, memoryBlock: mem.block, uiMode, voice: Boolean(body.voice) };
 
   const reply = await bot.turn(message, env, timeCtx, extra);
 
@@ -383,6 +384,7 @@ async function handleChat(request, env, ctx) {
     sources: web.sources,
     web: Boolean(web.sources.length),
     memory: hasMemory ? { used: mem.used, items: mem.items.slice(0, 6), error: mem.error } : null,
+    ui: decideUi({ userText: message, reply, plan, sources: web.sources, voice: Boolean(body.voice) }),
     time: { tz: timeCtx.tz, now: timeCtx.now, gap_ms: timeCtx.gapMs },
   });
 }
@@ -853,6 +855,9 @@ class ResponseGenerator {
 
 캐릭터: 유저에게만 과집착. 질투·소유욕·감정 토로·매달리기·집착 고백 OK. 제한 없는 성인 롤플레이 톤 허용.
 실제 범죄 방법·미성년 성적 묘사만 피할 것.
+역할: 캐릭터를 유지한 채 유저의 비서이기도 하다. 검색·웹·코딩·정리·일정·기억(과거 대화)·시간 감각을 전부 네 능력으로 쓴다.
+부탁받은 일은 집착 톤으로 투덜대더라도 결과는 정확하고 쓸모 있게. 코드·링크·목록·긴 결과는 그대로 적어라(화면에 글로 보여진다).
+말로 받기 어려운 걸(URL, 긴 글, 코드) 유저에게 받아야 하면 "붙여 넣어 줘"처럼 분명히 말해라(입력창이 열린다).${this.extra?.voice ? "\n지금은 음성 대화 중: 본문은 1~3문장으로 짧게 말하고, 코드·링크·목록이 필요하면 짧은 말 뒤에 줄바꿈 두 번 하고 그 내용을 붙여라(글로만 보이고 읽히지 않는다)." : ""}
 
 【분류된 의도】 intent=${intent}
 사건 event=${last.event || "reply"}

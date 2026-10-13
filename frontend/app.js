@@ -11,8 +11,10 @@ const input = document.getElementById("input");
 const apiLabel = document.getElementById("apiLabel");
 const stateEl = document.getElementById("state");
 const headerSub = document.getElementById("headerSub");
-const modeSecretaryBtn = document.getElementById("modeSecretary");
-const modeRpBtn = document.getElementById("modeRp");
+const appEl = document.querySelector(".app");
+const textToggleBtn = document.getElementById("textToggle");
+const textCloseBtn = document.getElementById("textClose");
+const textHint = document.getElementById("textHint");
 const clearPersistBtn = document.getElementById("clearPersist");
 const loginConfirmBar = document.getElementById("loginConfirmBar");
 const browseConfirm = document.getElementById("browseConfirm");
@@ -20,8 +22,8 @@ const loginConfirmHint = document.getElementById("loginConfirmHint");
 
 apiLabel.textContent = API_BASE;
 
-/** @type {"secretary"|"rp"} */
-let uiMode = "secretary";
+/** v1.6: single persona — 채티 does everything. Kept as a constant for payload compatibility. */
+const uiMode = "rp";
 let sessionId = "";
 let browseSessionId = "";
 let snapshot = null;
@@ -168,26 +170,22 @@ function looksLikeBrowseTask(text) {
   if (/^\s*\/(?:웹|web|browse)(?=\s|$)/i.test(raw)) return true;
   if (/^\s*\//.test(raw)) return false;
   const t = raw.normalize("NFC");
-  if (/(웹\s*(으로|에서|검색|열어|확인)|브라우저|검색해|구글|네이버|사이트\s*열)/.test(t)) {
-    return true;
-  }
+  // v1.6: lookups (뉴스·날씨·가격·검색해) go to /chat (auto web); browser *actions* / deep research go to /browse
+  if (/(브라우저|사이트\s*(를\s*)?(열|들어가)|페이지\s*(를\s*)?열|탭\s*열)/.test(t)) return true;
   if (
-    /(검색|열어|열어줘|열어봐|로그인|배포|찾아|찾아줘|확인해|확인하|확인\s*해|클릭|스크롤|캡처|스크린샷|접속|들어가|들어가서|들어가줘|다운로드|업로드|설치|설정|가입|회원가입|티켓|예약|가격|시세|뉴스|날씨|지도|링크|URL|url|http)/.test(
+    /(열어\s*(줘|봐|서)?|로그인|로그아웃|배포|클릭|스크롤|캡처|스크린샷|접속|들어가\s*(서|줘|봐)?|다운로드|업로드|설치해|설정\s*(바꿔|해\s*줘|들어가)|가입|회원가입|예약\s*(해|잡아)|티켓\s*(끊|예매)|예매|제출|등록해|커밋|푸시|머지|PR\s*(올려|만들어))/.test(
       t
     )
   ) {
     return true;
   }
-  if (/\b[\w-]+\.(com|net|org|io|dev|kr|co\.kr|ai|app)\b/i.test(t)) return true;
+  if (/(자세히|꼼꼼히|제대로|여러\s*(출처|사이트|군데))\s*(조사|알아봐|비교)|조사해\s*줘|비교해\s*줘|리서치/.test(t)) return true;
   if (/https?:\/\//i.test(t)) return true;
+  if (/\b[\w-]+\.(com|net|org|io|dev|kr|co\.kr|ai|app)\b/i.test(t) && /(열|들어가|접속|확인|봐)/.test(t)) return true;
   return false;
 }
 
 function shouldBrowse(message) {
-  if (uiMode === "rp") {
-    // RP mode: only explicit /웹|/web|/browse forces browse
-    return /^\s*\/(?:웹|web|browse)(?=\s|$)/i.test(message);
-  }
   return looksLikeBrowseTask(message);
 }
 
@@ -311,28 +309,71 @@ function redactBrowseGoal(goal) {
 }
 
 function showState(s) {
-  if (!s || uiMode === "secretary") {
-    if (uiMode === "secretary") stateEl.textContent = "";
-    return;
-  }
+  if (!s) return;
   stateEl.textContent = `집착 ${s.obsession} · 애착 ${s.attachment} · 불안 ${s.stress} · 반추 ${s.rumination} · ${s.emotion}`;
 }
 
-function setUiMode(mode) {
-  uiMode = mode === "rp" ? "rp" : "secretary";
-  modeSecretaryBtn.setAttribute("aria-pressed", uiMode === "secretary" ? "true" : "false");
-  modeRpBtn.setAttribute("aria-pressed", uiMode === "rp" ? "true" : "false");
-  if (uiMode === "secretary") {
-    headerSub.textContent = "개인 비서 · 일 시키면 알아서 처리";
-    input.placeholder = "말해 봐. 검색·열어·확인해… 자연스럽게 시키면 돼";
-    stateEl.textContent = "";
-  } else {
-    headerSub.textContent = "집착 동역학 롤플레이 · 상태는 말투로만";
-    input.placeholder = "말해 봐. /state /reset /silence · 웹은 /웹 …";
-  }
+function setUiMode() {
   persist();
-  if (window.ChaetiLive) window.ChaetiLive.onModeChange(uiMode);
+  if (window.ChaetiLive) window.ChaetiLive.onModeChange("rp");
 }
+
+/* ---------- text panel (face-first UX) ---------- */
+let textOpen = false;
+let textAutoCloseTimer = 0;
+const TEXT_AUTO_CLOSE_MS = 60000;
+/** 'need_input' keeps the panel open (and the mic paused) until the user sends or closes */
+let textNeedInput = "";
+
+function openText({ focus = false, needInput = "", hint = "", auto = false } = {}) {
+  textOpen = true;
+  textNeedInput = needInput || "";
+  appEl.classList.remove("text-hidden");
+  textToggleBtn.setAttribute("aria-pressed", "true");
+  if (textHint) {
+    textHint.textContent =
+      hint ||
+      (needInput === "url"
+        ? "링크(URL)를 붙여 넣고 보내 줘"
+        : needInput === "code"
+          ? "코드를 붙여 넣고 보내 줘"
+          : needInput
+            ? "긴 글은 여기 붙여 넣고 보내 줘"
+            : "");
+  }
+  log.scrollTop = log.scrollHeight;
+  if (focus || needInput) setTimeout(() => input.focus(), 50);
+  if (window.ChaetiLive) window.ChaetiLive.onTextPanel(true, Boolean(needInput));
+  scheduleTextAutoClose(auto && !needInput);
+}
+
+function closeText() {
+  textOpen = false;
+  textNeedInput = "";
+  clearTimeout(textAutoCloseTimer);
+  appEl.classList.add("text-hidden");
+  textToggleBtn.setAttribute("aria-pressed", "false");
+  if (textHint) textHint.textContent = "";
+  input.blur();
+  if (window.ChaetiLive) window.ChaetiLive.onTextPanel(false, false);
+}
+
+/** After an auto-opened reply, drift back to the face once the user stops touching the text */
+function scheduleTextAutoClose(enable) {
+  clearTimeout(textAutoCloseTimer);
+  if (!enable) return;
+  if (!window.ChaetiLive || !window.ChaetiLive.isVoiceOn()) return; // typing-only users keep the panel
+  textAutoCloseTimer = setTimeout(() => {
+    if (textOpen && !textNeedInput && document.activeElement !== input) closeText();
+  }, TEXT_AUTO_CLOSE_MS);
+}
+for (const ev of ["pointerdown", "keydown", "scroll"]) {
+  document.getElementById("textPanel").addEventListener(ev, () => {
+    if (textOpen && !textNeedInput) scheduleTextAutoClose(true);
+  }, { passive: true });
+}
+textToggleBtn.addEventListener("click", () => (textOpen ? closeText() : openText({ focus: true })));
+textCloseBtn.addEventListener("click", closeText);
 
 function addBubble(text, role, scroll = true) {
   const el = document.createElement("div");
@@ -344,11 +385,7 @@ function addBubble(text, role, scroll = true) {
 }
 
 function addWelcome() {
-  if (uiMode === "secretary") {
-    addBubble("나 채티야. 시킬 일 있으면 그냥 말해 — 검색·사이트 열기·확인 같은 건 내가 알아서 웹으로 처리할게.", "bot");
-  } else {
-    addBubble("…왔어? 나 채티야. 편하게 말해도 돼. (/reset /state /silence)", "bot");
-  }
+  addBubble("…왔어? 나 채티야. 말로 해도 되고, 글로 해도 돼. 검색·웹·코딩·기억 다 내가 해. (/reset /state /silence)", "bot");
 }
 
 function inferType(s) {
@@ -570,11 +607,10 @@ function showBrowseConfirm(data, goal) {
   sessionId = store.session_id || crypto.randomUUID();
   browseSessionId = store.browse_session_id || "";
   snapshot = store.snapshot || null;
-  uiMode = store.mode === "rp" ? "rp" : "secretary";
   lastBrowseSteps = Array.isArray(store.last_browse_steps) ? store.last_browse_steps : [];
   sessionStartedAt = Number(store.session_started_at) || 0;
   convId = typeof store.conv_id === "string" ? store.conv_id : "";
-  setUiMode(uiMode);
+  setUiMode();
 
   if (Array.isArray(store.messages) && store.messages.length) {
     messages = store.messages.slice(-60);
@@ -596,8 +632,6 @@ function showBrowseConfirm(data, goal) {
   persist();
 })();
 
-modeSecretaryBtn.addEventListener("click", () => setUiMode("secretary"));
-modeRpBtn.addEventListener("click", () => setUiMode("rp"));
 clearPersistBtn.addEventListener("click", () => {
   if (confirm("이 기기에 저장된 대화·상태를 지울까?")) clearAllPersist();
 });
@@ -609,6 +643,10 @@ form.addEventListener("submit", async (e) => {
   const message = input.value.trim();
   if (!message) return;
   input.value = "";
+  const wasNeedInput = Boolean(textNeedInput);
+  textNeedInput = "";
+  if (!textOpen) openText({ auto: true });
+  if (wasNeedInput && window.ChaetiLive) window.ChaetiLive.onTextPanel(true, false);
 
   if (shouldBrowse(message)) {
     await runBrowseTurn(stripWebPrefix(message) || message, { fromConfirm: false });
@@ -681,6 +719,10 @@ async function runChatTurn(message, opts = {}) {
     const thinking = Array.isArray(data.thinking) ? data.thinking.map((t) => String(t).slice(0, 400)) : [];
     const sources = Array.isArray(data.sources) ? data.sources : [];
     const chatMeta = { model: data.model, web: Boolean(data.web), open: false, memory: data.memory ? data.memory.items : [] };
+    const ui = data.ui || {};
+    if (ui.need_input) openText({ needInput: ui.need_input, focus: true });
+    else if (ui.show_text || (!opts.voice && !isEvent)) openText({ auto: true });
+    else scheduleTextAutoClose(true);
     pending.remove();
     const replyEl = addChatReply(reply, thinking, sources, chatMeta, !res.ok);
     if (res.ok) replyOut = reply;
@@ -717,6 +759,9 @@ window.Chaeti = {
   runChatTurn,
   getMode: () => uiMode,
   setMode: setUiMode,
+  openText,
+  closeText,
+  isTextOpen: () => textOpen,
   apiBase: API_BASE,
   getUserId: () => userId,
   setUserId: (id) => {
@@ -750,8 +795,7 @@ window.Chaeti = {
         sources: m.meta && m.meta.sources ? m.meta.sources : undefined,
       }))
       .slice(-60);
-    if (conv.mode === "secretary" || conv.mode === "rp") uiMode = conv.mode;
-    setUiMode(uiMode);
+    setUiMode();
     log.innerHTML = "";
     for (const m of messages) {
       if (m.role === "user") addBubble(m.content, "user", false);
@@ -761,6 +805,7 @@ window.Chaeti = {
     addBubble("(여기서부터 이어서 얘기해 — 서버에 저장된 대화야)", "bot", false);
     log.scrollTop = log.scrollHeight;
     persist();
+    openText({ focus: true });
   },
   lastUserMessageAt: () => {
     const m = [...messages].reverse().find((x) => x.role === "user" && typeof x.ts === "number");
@@ -900,6 +945,8 @@ async function runBrowseTurn(goal, opts = {}) {
     }
 
     addBrowseReply(finalReply, steps, meta, isErr, browseSources);
+    openText({ auto: true, hint: data.needs_human ? "보안문자는 러너 창에서 직접 풀어 줘" : "" });
+    if (window.ChaetiLive) window.ChaetiLive.onReply(reply, null, res.ok && !isErr);
     messages.push({
       role: "assistant",
       content: finalReply,

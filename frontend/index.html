@@ -7,24 +7,21 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div class="app">
+  <div class="app face-first text-hidden">
     <header>
       <div class="mark">채</div>
       <div class="header-text">
         <h1>채티</h1>
-        <p class="sub" id="headerSub">개인 비서 · 일 시키면 알아서 처리</p>
+        <p class="sub" id="headerSub">말 걸면 돼 · 검색·웹·기억·코딩 다 내가 해</p>
       </div>
       <button type="button" id="memoryOpen" class="live-btn memory-open" title="기억 (타임라인·주제·검색)">기억</button>
-      <div class="mode-soft" role="group" aria-label="모드">
-        <button type="button" id="modeSecretary" class="soft-btn" aria-pressed="true" title="비서 (기본)">비서</button>
-        <button type="button" id="modeRp" class="soft-btn" aria-pressed="false" title="롤플레이">채티(RP)</button>
-      </div>
+      <button type="button" id="textToggle" class="live-btn" aria-pressed="false" title="글로 보기 / 타이핑">글</button>
     </header>
 
     <div class="live-bar" role="group" aria-label="라이브 모드">
-      <button type="button" id="liveFace" class="live-btn" aria-pressed="false" hidden title="얼굴 표정 모드">얼굴</button>
-      <button type="button" id="liveVoice" class="live-btn" aria-pressed="false" hidden title="음성 대화 (ko-KR)">음성</button>
-      <button type="button" id="liveCam" class="live-btn" aria-pressed="false" hidden title="카메라로 사람 인식 (영상은 기기 밖으로 안 나감)">카메라</button>
+      <button type="button" id="liveFace" class="live-btn" aria-pressed="false" title="얼굴 표정 모드">얼굴</button>
+      <button type="button" id="liveVoice" class="live-btn" aria-pressed="false" title="음성 대화 (ko-KR)">음성</button>
+      <button type="button" id="liveCam" class="live-btn" aria-pressed="false" title="카메라로 사람 인식 (영상은 기기 밖으로 안 나감)">카메라</button>
       <span id="liveStatus" class="live-status"></span>
     </div>
 
@@ -67,19 +64,33 @@
       <canvas id="camCanvas" class="cam-canvas"></canvas>
     </section>
 
-    <div id="state" class="state"></div>
-    <main id="log" aria-live="polite"></main>
+    <section id="textPanel" class="text-panel" aria-label="글">
+      <div class="text-panel-head">
+        <span id="textHint" class="text-hint"></span>
+        <button type="button" id="textClose" class="linkish">얼굴로 돌아가기</button>
+      </div>
+      <div id="state" class="state"></div>
+      <main id="log" aria-live="polite"></main>
 
-    <div id="loginConfirmBar" class="login-confirm-bar" hidden>
-      <p id="loginConfirmHint" class="browse-confirm-hint"></p>
-      <button type="button" id="browseConfirm" class="browse-confirm">로그인 허용하고 계속</button>
-    </div>
+      <div id="loginConfirmBar" class="login-confirm-bar" hidden>
+        <p id="loginConfirmHint" class="browse-confirm-hint"></p>
+        <button type="button" id="browseConfirm" class="browse-confirm">로그인 허용하고 계속</button>
+      </div>
 
-    <form id="form">
-      <input id="input" autocomplete="off" placeholder="말해 봐. 검색·열어·확인해… 자연스럽게 시키면 돼" />
-      <button type="submit">보내기</button>
-    </form>
-    <p class="hint">API: <code id="apiLabel"></code> · 대화는 이 기기에 저장 · <button type="button" id="clearPersist" class="linkish">기록 지우기</button></p>
+      <form id="form">
+        <input id="input" autocomplete="off" placeholder="타이핑으로 말하기 · URL·긴 글·코드는 여기 붙여 넣어" />
+        <button type="submit">보내기</button>
+      </form>
+      <p class="hint">API: <code id="apiLabel"></code> · 대화는 이 기기 + 서버 기억에 저장 · <button type="button" id="clearPersist" class="linkish">이 기기 기록 지우기</button></p>
+    </section>
+  </div>
+  <div id="startOverlay" class="start-overlay">
+    <button type="button" id="startBtn" class="start-btn">
+      <span class="start-mark">채</span>
+      <span>탭해서 채티 깨우기</span>
+      <small>얼굴 + 음성으로 시작해 (마이크 권한 필요)</small>
+    </button>
+    <button type="button" id="startText" class="linkish">그냥 글로 할래</button>
   </div>
   <section id="memoryPanel" class="memory-panel" hidden aria-label="기억">
     <header class="memory-head">
