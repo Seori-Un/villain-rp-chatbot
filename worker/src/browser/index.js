@@ -20,6 +20,7 @@ export async function handleBrowse(request, env) {
   const session_id = (body.session_id || body.sessionId || "").toString() || undefined;
   const max_steps = body.max_steps ?? body.maxSteps ?? 8;
   const confirm = body.confirm && typeof body.confirm === "object" ? body.confirm : {};
+  const continue_round = Boolean(body.continue || body.continue_round);
 
   if (!isBrowserConfigured(env)) {
     return {
@@ -59,6 +60,7 @@ export async function handleBrowse(request, env) {
       session_id,
       max_steps,
       confirm,
+      continue_round,
     });
   } catch (e) {
     const msg = String(e && e.message ? e.message : e).slice(0, 240);

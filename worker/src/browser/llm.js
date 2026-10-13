@@ -233,14 +233,26 @@ function toClaudeMessages(messages) {
       continue;
     }
     if (m.role === "tool") {
+      const inner = [{ type: "text", text: typeof m.content === "string" ? m.content : JSON.stringify(m.content) }];
+      if (m.image) inner.push({ type: "image", source: { type: "base64", media_type: m.image.mime || "image/png", data: m.image.b64 } });
       out.push({
         role: "user",
         content: [
           {
             type: "tool_result",
             tool_use_id: m.tool_call_id || "unknown",
-            content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+            content: inner,
           },
+        ],
+      });
+      continue;
+    }
+    if (m.role === "user" && m.image) {
+      out.push({
+        role: "user",
+        content: [
+          { type: "text", text: String(m.content || "") },
+          { type: "image", source: { type: "base64", media_type: m.image.mime || "image/png", data: m.image.b64 } },
         ],
       });
       continue;
@@ -493,17 +505,20 @@ function toGeminiContents(messages) {
       continue;
     }
     if (m.role === "tool") {
-      contents.push({
-        role: "user",
-        parts: [
-          {
-            functionResponse: {
-              name: m.name || "tool",
-              response: safeJson(m.content),
-            },
+      const parts = [
+        {
+          functionResponse: {
+            name: m.name || "tool",
+            response: safeJson(m.content),
           },
-        ],
-      });
+        },
+      ];
+      if (m.image) parts.push({ inlineData: { mimeType: m.image.mime || "image/png", data: m.image.b64 } });
+      contents.push({ role: "user", parts });
+      continue;
+    }
+    if (m.role === "user" && m.image) {
+      contents.push({ role: "user", parts: [{ text: String(m.content || "") }, { inlineData: { mimeType: m.image.mime || "image/png", data: m.image.b64 } }] });
       continue;
     }
     if (m.role === "assistant" && m.tool_calls) {

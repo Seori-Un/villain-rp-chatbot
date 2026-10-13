@@ -26,6 +26,7 @@ import {
   feelingsForClient,
   IDENTITY_Q,
 } from "./feelings.js";
+import { buildLexicon, repairHearing } from "./hearing.js";
 import {
   memoryEnabled,
   cleanUserId,
@@ -84,7 +85,7 @@ async function handleRequest(request, env, ctx) {
       return json({
         ok: true,
         bot: "채티",
-        version: "chaeti-v1.7-feelings",
+        version: "chaeti-v1.8-sharper",
         chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
@@ -340,6 +341,22 @@ async function handleChat(request, env, ctx) {
 
   const timeCtx = resolveTimeContext(body, bot.lastMessageAt);
 
+  // Stage 0: hearing — voice turns may be misrecognized; repair with this person's own vocabulary
+  const userIdEarly = cleanUserId(body.user_id);
+  let heard = { text: message, repaired: false, confidence: 1, ask: "", note: "" };
+  if (body.voice && message.trim() && !message.startsWith("/")) {
+    const lexicon = await buildLexicon(env, userIdEarly);
+    const asr = body.asr && typeof body.asr === "object" ? body.asr : {};
+    heard = await repairHearing(env, {
+      text: message,
+      alternatives: Array.isArray(asr.alternatives) ? asr.alternatives : [],
+      confidence: Number(asr.confidence) || 0,
+      lexicon,
+      recent: bot.gen.history.slice(-4),
+    });
+    if (heard.repaired) message = heard.text;
+  }
+
   // Stage 1: think (plan) → Stage 1.5: web if needed → Stage 2: answer
   // 채티 is one being; ui_mode is ignored (kept for payload compatibility).
   const uiMode = "rp";
@@ -374,10 +391,16 @@ async function handleChat(request, env, ctx) {
   });
   const feelings = reacted.feelings;
   const identityAsked = Boolean(reacted.delta._identity) || IDENTITY_Q.test(message);
+  const hearingBlock = heard.ask
+    ? `【잘 못 들음】 "${heard.text}"라고 들렸는데 확실하지 않다. 먼저 짧게 되물어라: "${heard.ask}" (네 말투로). 되묻기만 하고 답은 아직 하지 마라.`
+    : heard.repaired
+      ? `【들은 말 보정】 원래 "${body.message}"로 들렸지만 문맥상 "${heard.text}"로 이해했다 (${heard.note}). 이해한 쪽으로 답하라.`
+      : "";
   const extra = {
     planBlock: formatPlanBlock(plan),
     webBlock: web.block,
     memoryBlock: mem.block,
+    hearingBlock,
     feelingsBlock: feelingsPromptBlock(feelings),
     identityAsked,
     uiMode,
@@ -403,6 +426,7 @@ async function handleChat(request, env, ctx) {
   bot.turnCount = (bot.turnCount || 0) + 1;
 
   const thinking = [
+    ...(heard.repaired || heard.ask ? [`들은 말: "${body.message}" → ${heard.ask ? "애매해서 되물음" : `"${heard.text}" (${heard.note})`}`] : []),
     ...(plan ? plan.thoughts : []),
     ...(mem.used.hits || mem.used.topics || mem.used.days
       ? [`기억 참고: 최근 ${mem.used.days}일 요약 · 관련 대화 ${mem.used.hits}개 · 주제 ${mem.used.topics}개`]
@@ -426,6 +450,7 @@ async function handleChat(request, env, ctx) {
     ui: decideUi({ userText: message, reply, plan, sources: web.sources, voice: Boolean(body.voice) }),
     feelings: feelingsForClient(feelings),
     proactive: proactiveHints(feelings),
+    heard: body.voice ? { text: heard.text, repaired: heard.repaired, confidence: heard.confidence, ask: heard.ask || undefined, note: heard.note || undefined } : undefined,
     time: { tz: timeCtx.tz, now: timeCtx.now, gap_ms: timeCtx.gapMs },
   });
 }
@@ -921,6 +946,7 @@ ${dirs}
 ${memTxt}
 ${timeBlock ? "\n" + timeBlock : ""}
 ${this.extra?.feelingsBlock ? "\n" + this.extra.feelingsBlock : ""}
+${this.extra?.hearingBlock ? "\n" + this.extra.hearingBlock : ""}
 ${this.extra?.memoryBlock ? "\n" + this.extra.memoryBlock : ""}
 ${this.extra?.planBlock ? "\n" + this.extra.planBlock : ""}
 ${this.extra?.webBlock ? "\n" + this.extra.webBlock + "\n웹 참고가 있으면 사실은 거기서만 가져오고, 끝에 '출처 [n]' 식으로 번호를 붙여라. 집착 톤은 유지." : ""}

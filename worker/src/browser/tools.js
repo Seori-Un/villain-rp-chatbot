@@ -35,11 +35,13 @@ export const BROWSER_TOOLS = [
     type: "function",
     function: {
       name: "click",
-      description: "Click an element by CSS selector or viewport coordinates.",
+      description: "Click an element. Prefer `ref` (number from the last observation's elements list). Fallbacks: CSS selector, visible text, or x/y.",
       parameters: {
         type: "object",
         properties: {
+          ref: { type: "number", description: "elements[].ref from the latest observation" },
           selector: { type: "string", description: "CSS selector" },
+          text_match: { type: "string", description: "Visible text of the element (partial ok)" },
           x: { type: "number" },
           y: { type: "number" },
         },
@@ -51,17 +53,58 @@ export const BROWSER_TOOLS = [
     function: {
       name: "type",
       description:
-        "Type text into an input. Password fields: only when user supplied creds in goal (dev allowlist) or confirmed — never invent credentials.",
+        "Type into an input (clears it first). Target by `ref` (preferred) or selector. Password fields: only when the user supplied creds in the goal or confirmed — never invent credentials.",
       parameters: {
         type: "object",
         properties: {
+          ref: { type: "number" },
           selector: { type: "string" },
           text: { type: "string" },
           submit: { type: "boolean", description: "Press Enter after typing" },
           is_password: { type: "boolean" },
         },
-        required: ["selector", "text"],
+        required: ["text"],
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "press",
+      description: "Press a keyboard key (Enter, Escape, Tab, ArrowDown, Control+a …).",
+      parameters: { type: "object", properties: { key: { type: "string" } }, required: ["key"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "select",
+      description: "Choose an option in a <select> by value or label.",
+      parameters: { type: "object", properties: { ref: { type: "number" }, selector: { type: "string" }, value: { type: "string" } }, required: ["value"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "back",
+      description: "Browser back.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "wait",
+      description: "Wait for a selector/text to appear, or N ms. Use after clicks that load slowly.",
+      parameters: { type: "object", properties: { selector: { type: "string" }, text_match: { type: "string" }, ms: { type: "number" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "find",
+      description: "Find where some text is on the current page (returns matches with vertical position). Use before scrolling blindly.",
+      parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
     },
   },
   {
@@ -142,7 +185,9 @@ export function browserSystemPrompt({ maxSteps }) {
 매 행동 전에 짧게 생각하고(한국어), 관찰한 뒤 다음 행동을 고른다.
 다단계 작업은 "n/${maxSteps} 단계" 식으로 보고한다.
 
-도구: search, read, open, screenshot, click, type, scroll, done
+도구: search, read, open, screenshot, click, type, press, select, scroll, wait, find, back, done
+관찰(observation)에는 url·title·본문·elements(번호 ref가 붙은 클릭/입력 가능한 요소들)·scroll·스크린샷이 온다.
+클릭·입력은 elements의 ref 번호로 한다 (selector 추측 금지). 원하는 요소가 목록에 없으면 find(텍스트)나 scroll 후 screenshot으로 다시 본다.
 
 조사형 목표(검색해·찾아·알아봐·비교해·최신·가격·뉴스 등)는 이 순서로 한다:
   1) search 1~2회(검색어를 바꿔서) → 2) 서로 다른 출처 2~4개를 read → 3) 출처끼리 비교(일치/불일치, 날짜, 신뢰도)
@@ -151,7 +196,11 @@ export function browserSystemPrompt({ maxSteps }) {
 조작형 목표(로그인·클릭·입력·배포 등)는 open → screenshot → click/type 으로 진행한다.
 
 규칙:
-- 조작형은 먼저 open 또는 screenshot으로 관찰한 뒤 행동한다.
+- 조작형은 먼저 open 또는 screenshot으로 관찰한 뒤 행동한다. 행동 뒤엔 결과(URL·제목·본문 변화)를 확인하고, 안 바뀌었으면 다른 방법(다른 ref, press Enter, wait, 스크롤)으로 한 번 더.
+- 쿠키 동의·팝업·"나중에" 배너가 화면을 가리면 먼저 닫는다(닫기/동의/나중에 ref).
+- 검색창은 type(ref, text, submit:true). 로그인은 아이디 type → 비밀번호 type(is_password) → 로그인 버튼 click → 결과 확인.
+- 같은 행동을 두 번 반복했는데 화면이 그대로면 멈추고 접근을 바꾼다(다른 페이지, 다른 경로, read로 본문 확인).
+- 한 번에 여러 도구를 연달아 호출해도 된다(예: type 후 click). 단 결과를 봐야 하는 지점에선 멈춘다.
 - 클릭·입력 뒤에는 가능하면 screenshot으로 결과를 확인한다.
 - 결제/은행/체크아웃·암호화폐 거래소 페이지는 열지 말고 done으로 거절한다.
 - 로그인(GitHub, Cloudflare, Google, Naver 등 일반 사이트 전부)은 사용자가 goal에 이메일/비밀번호를 넣었거나
@@ -170,6 +219,8 @@ ReAct JSON 형식 예:
 {"thought":"먼저 검색해서 출처를 모은다","action":"search","args":{"query":"2026 한글날 행사"}}
 {"thought":"첫 결과 본문을 읽는다","action":"read","args":{"url":"https://example.com/article"}}
 {"thought":"예제 페이지를 연다","action":"open","args":{"url":"https://example.com"}}
+{"thought":"검색창(ref 3)에 입력하고 엔터","action":"type","args":{"ref":3,"text":"채티","submit":true}}
+{"thought":"첫 결과(ref 7) 클릭","action":"click","args":{"ref":7}}
 {"thought":"제목을 확인했다","action":"done","args":{"summary":"example.com을 열었고 제목은 Example Domain이야."}}`;
 }
 

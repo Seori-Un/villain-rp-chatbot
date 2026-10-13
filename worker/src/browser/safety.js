@@ -344,7 +344,7 @@ export function checkAction(tool, confirm = {}, context = {}) {
   }
 
   // Block click-through / type on payment or crypto if we somehow landed there
-  if ((action === "click" || action === "type") && pageUrl) {
+  if ((action === "click" || action === "type" || action === "press" || action === "select") && pageUrl) {
     try {
       const u = new URL(pageUrl);
       if (isSensitiveHost(u.hostname, u.pathname)) {

@@ -600,3 +600,6 @@ button[type="submit"] { border-radius: 999px; background: linear-gradient(135deg
 .face.glowing .glint { r: 3px; }
 .face.tired .lid { height: 10px; }
 .face.tired .mouth { stroke-width: 3; }
+
+/* ASR repair: what was heard vs understood */
+.heard-raw { color: var(--muted); text-decoration: line-through; text-decoration-color: #5a4a3a; margin-right: 0.2rem; }

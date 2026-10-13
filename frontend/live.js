@@ -266,8 +266,11 @@
     r.lang = "ko-KR";
     r.interimResults = true;
     r.continuous = false;
-    r.maxAlternatives = 1;
+    r.maxAlternatives = 4;
     let finalText = "";
+    /** @type {Array<{text:string, confidence:number}>} alternatives of the final result (best first) */
+    let alts = [];
+    let confidence = 0;
     r.onstart = () => {
       st.listening = true;
       setStatus("듣는 중… (말해 봐)", "listening");
@@ -275,9 +278,17 @@
     r.onresult = (ev) => {
       let interim = "";
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        const t = ev.results[i][0].transcript;
-        if (ev.results[i].isFinal) finalText += t;
-        else interim += t;
+        const res = ev.results[i];
+        const t = res[0].transcript;
+        if (res.isFinal) {
+          finalText += t;
+          confidence = Number(res[0].confidence) || 0;
+          alts = [];
+          for (let k = 0; k < res.length && k < 4; k++) {
+            const a = String(res[k].transcript || "").trim();
+            if (a && !alts.some((x) => x.text === a)) alts.push({ text: a, confidence: Number(res[k].confidence) || 0 });
+          }
+        } else interim += t;
       }
       if (interim) setStatus("듣는 중… " + interim.slice(-40), "listening");
     };
@@ -294,7 +305,7 @@
       const text = finalText.trim();
       if (!st.voice) return;
       if (text) {
-        await handleVoiceUtterance(text);
+        await handleVoiceUtterance(text, { alternatives: alts.slice(1).map((a) => a.text), confidence });
       }
       if (st.voice) restartTimer = setTimeout(listenOnce, 350);
     };
@@ -306,12 +317,12 @@
     }
   }
 
-  async function handleVoiceUtterance(text) {
+  async function handleVoiceUtterance(text, asr = null) {
     if (!window.Chaeti) return;
     st.busy = true;
     setStatus("생각 중…", "busy");
     try {
-      const reply = await window.Chaeti.runChatTurn(text, { voice: true });
+      const reply = await window.Chaeti.runChatTurn(text, { voice: true, asr });
       if (reply) await speak(reply);
     } finally {
       st.busy = false;

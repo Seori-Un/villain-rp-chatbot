@@ -94,8 +94,8 @@ assert(bankPw.code === "blocked_payment", "bank password fill blocked even if co
 
 assert(parseReactAction('{"thought":"ok","action":"done","args":{"summary":"ok"}}')?.action === "done", "react parse");
 assert(parseReactAction('{"thought":"t","action":"done","args":{"summary":"ok"}}')?.thought === "t", "react thought");
-assert(BROWSER_TOOLS.length === 8, "eight tools (search, read added)");
-assert(geminiFunctionDeclarations().length === 8, "gemini decls");
+assert(BROWSER_TOOLS.length === 13, "13 tools");
+assert(geminiFunctionDeclarations().length === 13, "gemini decls");
 assert(!isBrowserConfigured({}), "unconfigured");
 assert(resolveBrowseLlm({}).provider === null, "no llm");
 assert(resolveBrowseLlm({ GEMINI_API_KEY: "x" }).provider === "gemini", "gemini prefer");

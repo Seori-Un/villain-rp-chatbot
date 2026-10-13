@@ -84,13 +84,29 @@ export async function browserAct(env, payload) {
 export function compactObservation(result) {
   if (!result) return { ok: false };
   const shot = result.screenshot_b64 || result.screenshot;
-  return {
+  const elements = Array.isArray(result.elements)
+    ? result.elements.slice(0, 45).map((e) => {
+        const o = { ref: e.ref, role: e.role, name: e.name };
+        if (e.href) o.href = e.href;
+        if (e.value) o.value = e.value;
+        if (e.inview === false) o.below = true;
+        return o;
+      })
+    : undefined;
+  const out = {
     ok: result.ok !== false,
     url: result.url,
     title: result.title,
-    text: String(result.text || result.snippet || "").slice(0, 2500),
+    text: String(result.text || result.snippet || "").slice(0, 2200),
+    elements,
+    scroll: result.scroll,
+    hits: result.hits,
     error: result.error || result.message,
-    screenshot_bytes: shot ? String(shot).length : 0,
-    screenshot_note: shot ? "(screenshot captured; omitted from LLM context)" : undefined,
+    screenshot_note: shot ? "(스크린샷 첨부됨 — 보이는 그대로 판단해)" : undefined,
   };
+  // kept out of JSON.stringify (non-enumerable) — llm.js attaches it as an image block for vision planners
+  if (shot && typeof shot === "string" && shot.length < 1500000) {
+    Object.defineProperty(out, "_image", { value: { b64: shot, mime: result.screenshot_mime || "image/png" }, enumerable: false });
+  }
+  return out;
 }

@@ -707,6 +707,7 @@ async function runChatTurn(message, opts = {}) {
           ...timePayload,
           ...live,
           voice: Boolean(opts.voice || live.voice),
+          asr: opts.asr || undefined,
           event: opts.event || undefined,
           client_now: Date.now(),
         }),
@@ -721,6 +722,16 @@ async function runChatTurn(message, opts = {}) {
     const sources = Array.isArray(data.sources) ? data.sources : [];
     const chatMeta = { model: data.model, web: Boolean(data.web), open: false, memory: data.memory ? data.memory.items : [] };
     const ui = data.ui || {};
+    if (data.heard && data.heard.repaired && data.heard.text && data.heard.text !== message) {
+      const bubbles = log.querySelectorAll(".bubble.user");
+      const ub = bubbles[bubbles.length - 1];
+      if (ub) {
+        ub.innerHTML = `<span class="heard-raw">${escapeHtml(message)}</span> → ${escapeHtml(data.heard.text)}`;
+        ub.title = "들린 말 → 이해한 말";
+      }
+      const last = [...messages].reverse().find((m) => m.role === "user");
+      if (last && last.content === message) last.content = data.heard.text;
+    }
     if (ui.need_input) openText({ needInput: ui.need_input, focus: true });
     else if (ui.show_text || (!opts.voice && !isEvent)) openText({ auto: true });
     else scheduleTextAutoClose(true);
@@ -814,8 +825,11 @@ window.Chaeti = {
   },
 };
 
+const BROWSE_MAX_ROUNDS = 4; // a long task = several ~2min rounds, continued automatically
+
 async function runBrowseTurn(goal, opts = {}) {
   const fromConfirm = Boolean(opts.fromConfirm);
+  const round = Number(opts.round) || 1;
   if (!goal) return;
 
   const btn = form.querySelector("button");
@@ -824,7 +838,9 @@ async function runBrowseTurn(goal, opts = {}) {
   if (!fromConfirm) hideBrowseConfirm();
 
   const displayGoal = redactBrowseGoal(goal);
-  if (!fromConfirm) {
+  if (round > 1) {
+    /* continuing: no new user bubble */
+  } else if (!fromConfirm) {
     addBubble(displayGoal, "user");
     messages.push({ role: "user", content: displayGoal, kind: "browse" });
   } else {
@@ -873,6 +889,7 @@ async function runBrowseTurn(goal, opts = {}) {
     session_id: browseSessionId || sessionId || undefined,
     max_steps: BROWSE_MAX_STEPS,
     confirm: confirmPayload,
+    continue: round > 1,
   };
 
   async function doBrowseFetch(isRetry) {
@@ -945,9 +962,11 @@ async function runBrowseTurn(goal, opts = {}) {
       hideBrowseConfirm();
     }
 
+    const willContinue = Boolean(data.can_continue) && !data.needs_confirm && !data.needs_human && round < BROWSE_MAX_ROUNDS;
+    if (willContinue) finalReply = reply + `\n(${round}/${BROWSE_MAX_ROUNDS}라운드 · 이어서 계속할게…)`;
     addBrowseReply(finalReply, steps, meta, isErr, browseSources);
     openText({ auto: true, hint: data.needs_human ? "보안문자는 러너 창에서 직접 풀어 줘" : "" });
-    if (window.ChaetiLive) window.ChaetiLive.onReply(reply, null, res.ok && !isErr);
+    if (window.ChaetiLive && !willContinue) window.ChaetiLive.onReply(reply, null, res.ok && !isErr);
     messages.push({
       role: "assistant",
       content: finalReply,
@@ -957,6 +976,11 @@ async function runBrowseTurn(goal, opts = {}) {
       sources: browseSources.slice(0, 8),
     });
     persist();
+    if (willContinue) {
+      btn.disabled = false;
+      await sleep(400);
+      return runBrowseTurn(goal, { ...opts, fromConfirm: false, round: round + 1 });
+    }
   } catch (err) {
     pendingWrap.remove();
     const c = classifyFetchError(err);

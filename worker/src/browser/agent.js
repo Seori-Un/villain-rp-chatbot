@@ -19,7 +19,28 @@ import { planBrowseStep, resolveBrowseLlm } from "./llm.js";
  * @param {number} [opts.max_steps]
  * @param {object} [opts.confirm]
  */
-export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, confirm = {} }) {
+/** per-session agent transcript so a long task can continue across several /browse rounds */
+const BROWSE_STATE = new Map();
+const BROWSE_STATE_TTL = 20 * 60 * 1000;
+function getBrowseState(sid, goal) {
+  const st = BROWSE_STATE.get(sid);
+  if (!st || Date.now() - st.touched > BROWSE_STATE_TTL || st.goal !== goal) return null;
+  return st;
+}
+function saveBrowseState(sid, goal, messages, round, page, sources) {
+  if (BROWSE_STATE.size > 100) {
+    const oldest = [...BROWSE_STATE.entries()].sort((a, b) => a[1].touched - b[1].touched)[0];
+    if (oldest) BROWSE_STATE.delete(oldest[0]);
+  }
+  // keep system + user goal + last ~28 turns; drop images beyond the last one
+  const sys = messages.filter((m) => m.role === "system");
+  const rest = messages.filter((m) => m.role !== "system").slice(-28);
+  let imgs = 0;
+  for (let i = rest.length - 1; i >= 0; i--) if (rest[i].image) { imgs++; if (imgs > 1) delete rest[i].image; }
+  BROWSE_STATE.set(sid, { goal, messages: [...sys, ...rest], round, page, sources, touched: Date.now() });
+}
+
+export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, confirm = {}, continue_round = false }) {
   const goalCheck = checkGoal(goal);
   if (!goalCheck.ok) {
     return {
@@ -65,15 +86,32 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
   let providerUsed = llmInfo.provider;
   let modelUsed = null;
 
+  /** @type {Array<{n:number,title:string,url:string}>} sources collected via search/read */
+  const sources = [];
+  const noteSource = (title, url) => {
+    if (!url || sources.some((x) => x.url === url)) return;
+    sources.push({ n: sources.length + 1, title: String(title || url).slice(0, 120), url });
+  };
   const system = browserSystemPrompt({ maxSteps });
-  /** @type {{role:string, content?:string, tool_calls?:any[], tool_call_id?:string, name?:string}[]} */
-  const messages = [
-    { role: "system", content: system },
-    {
-      role: "user",
-      content: `목표: ${goal}\n세션: ${sid}\n최대 ${maxSteps} 단계.\n매 행동 전 한국어로 짧게 생각하고, 끝나면 done(summary)으로 한국어 요약해.`,
-    },
-  ];
+  const prior = continue_round ? getBrowseState(sid, goal) : null;
+  const round = prior ? prior.round + 1 : 1;
+  /** @type {{role:string, content?:string, tool_calls?:any[], tool_call_id?:string, name?:string, image?:object}[]} */
+  const messages = prior
+    ? [
+        ...prior.messages,
+        { role: "user", content: `(${round}번째 이어서) 시간이 끊겨서 다시 시작했다. 위 진행 상황에서 이어서 목표를 끝내라. 끝났으면 done(summary).` },
+      ]
+    : [
+        { role: "system", content: system },
+        {
+          role: "user",
+          content: `목표: ${goal}\n세션: ${sid}\n최대 ${maxSteps} 단계.\n매 행동 전 한국어로 짧게 생각하고, 끝나면 done(summary)으로 한국어 요약해.`,
+        },
+      ];
+  if (prior) {
+    if (prior.page) page = prior.page;
+    if (Array.isArray(prior.sources)) for (const s of prior.sources) if (!sources.some((x) => x.url === s.url)) sources.push({ ...s, n: sources.length + 1 });
+  }
 
   let mode = "tools";
   let finalSummary = null;
@@ -82,12 +120,6 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
   const credNote = goalCreds.present
     ? " · 자격증명 감지됨 — 호스트당 세션 1회 확인 후 입력 (은행·결제는 차단)"
     : "";
-  /** @type {Array<{n:number,title:string,url:string}>} sources collected via search/read */
-  const sources = [];
-  const noteSource = (title, url) => {
-    if (!url || sources.some((x) => x.url === url)) return;
-    sources.push({ n: sources.length + 1, title: String(title || url).slice(0, 120), url });
-  };
   pushStep(steps, {
     type: "think",
     content: `목표를 확인했어. 검색·읽기·브라우저로 처리할게. (LLM: ${llmInfo.provider} · 검색: ${searchProvider(env)}${credNote})`,
@@ -99,8 +131,11 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
         type: "think",
         content: "시간이 길어져서 여기까지 정리하고 응답할게. 이어서 시키면 이어서 할게.",
       });
+      saveBrowseState(sid, goal, messages, round, page, sources);
       const partial = (await synthesizeFromSteps(env, goal, steps, sources)) || buildPartialSummary(steps, maxSteps, page);
       return finish({
+        canContinue: true,
+        round,
         sources,
         ok: true,
         reply:
@@ -253,6 +288,7 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
 
       if (act.action === "done") {
         finalSummary = String(act.args?.summary || act.args?.message || "완료").trim();
+        BROWSE_STATE.delete(sid);
         pushStep(steps, {
           type: "tool",
           n,
@@ -520,10 +556,12 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
           ok: shotCompact.ok,
           auto_screenshot: true,
         });
-        messages.push({
-          role: "user",
-          content: `자동 화면 관찰(JSON): ${JSON.stringify(shotCompact)}\n이어서 다음 행동을 정해.`,
-        });
+        messages.push(
+          attachImage(messages, {
+            role: "user",
+            content: `자동 화면 관찰(JSON): ${JSON.stringify(shotCompact)}\n이어서 다음 행동을 정해.`,
+          }, shotCompact)
+        );
       }
 
       if (act.action === "done") {
@@ -542,10 +580,17 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
     });
   }
 
+  let canContinue = false;
   if (!finalSummary) {
+    saveBrowseState(sid, goal, messages, round, page, sources);
+    canContinue = true;
     finalSummary = (await synthesizeFromSteps(env, goal, steps, sources)) || buildPartialSummary(steps, maxSteps, page);
+  } else {
+    BROWSE_STATE.delete(sid);
   }
   return finish({
+    canContinue,
+    round,
     sources,
     ok: true,
     reply: finalSummary,
@@ -614,11 +659,16 @@ function pushStep(steps, step) {
 function summarizeTool(act, compact) {
   const a = act.args || {};
   if (act.action === "open") return `열기 ${a.url || ""}`.trim();
-  if (act.action === "click") return `클릭 ${a.selector || `(${a.x},${a.y})`}`;
-  if (act.action === "type") return `입력 ${a.selector || ""} ← ${a.text === "***" ? "***" : String(a.text || "").slice(0, 40)}`;
+  if (act.action === "click") return `클릭 ${a.ref != null ? "#" + a.ref : a.selector || a.text_match || `(${a.x},${a.y})`}`;
+  if (act.action === "type") return `입력 ${a.ref != null ? "#" + a.ref : a.selector || ""} ← ${a.text === "***" ? "***" : String(a.text || "").slice(0, 40)}`;
   if (act.action === "scroll") return `스크롤 ${a.direction || "down"}`;
   if (act.action === "screenshot") return "화면 캡처";
   if (act.action === "search") return `검색 ${a.query || ""}`;
+  if (act.action === "press") return `키 ${a.key || ""}`;
+  if (act.action === "select") return `선택 ${a.value || ""}`;
+  if (act.action === "wait") return `기다림 ${a.selector || a.text_match || (a.ms ? a.ms + "ms" : "")}`;
+  if (act.action === "find") return `찾기 ${a.query || ""}`;
+  if (act.action === "back") return "뒤로";
   if (act.action === "read") return `읽기 ${a.url || ""}`;
   if (!compact.ok) return `실패: ${compact.error || "error"}`;
   return act.action;
@@ -649,6 +699,8 @@ function buildPartialSummary(steps, maxSteps, page) {
 function finish({
   sources,
   needsHuman,
+  canContinue,
+  round,
   ok,
   reply,
   steps,
@@ -683,6 +735,8 @@ function finish({
     model: modelUsed || undefined,
     sources: Array.isArray(sources) ? sources : [],
     needs_human: needsHuman || null,
+    can_continue: Boolean(canContinue),
+    round: round || 1,
   };
   if (llmInfo?.provider !== "claude") {
     out.hint_anthropic =
@@ -728,6 +782,17 @@ function redactArgs(args) {
   return copy;
 }
 
+const MAX_IMAGES_IN_CONTEXT = 2;
+function attachImage(messages, msg, compact) {
+  if (compact && compact._image) {
+    msg.image = compact._image;
+    // only the latest screenshots stay in context (token budget)
+    const withImg = messages.filter((m) => m.image);
+    while (withImg.length >= MAX_IMAGES_IN_CONTEXT) delete withImg.shift().image;
+  }
+  return msg;
+}
+
 function appendToolResult(messages, act, mode, planned, compact) {
   if ((mode === "tools" || act.id) && act.id) {
     if (planned._assistantPushed !== true) {
@@ -744,12 +809,14 @@ function appendToolResult(messages, act, mode, planned, compact) {
       });
       planned._assistantPushed = true;
     }
-    messages.push({
-      role: "tool",
-      tool_call_id: act.id,
-      name: act.action,
-      content: JSON.stringify(compact),
-    });
+    messages.push(
+      attachImage(messages, {
+        role: "tool",
+        tool_call_id: act.id,
+        name: act.action,
+        content: JSON.stringify(compact),
+      }, compact)
+    );
   } else {
     messages.push({
       role: "assistant",
@@ -759,9 +826,11 @@ function appendToolResult(messages, act, mode, planned, compact) {
         args: redactArgs(act.args),
       }),
     });
-    messages.push({
-      role: "user",
-      content: `관찰(JSON): ${JSON.stringify(compact)}\n다음 액션 JSON을 한 줄로 (thought 포함).`,
-    });
+    messages.push(
+      attachImage(messages, {
+        role: "user",
+        content: `관찰(JSON): ${JSON.stringify(compact)}\n다음 액션 JSON을 한 줄로 (thought 포함).`,
+      }, compact)
+    );
   }
 }
