@@ -1,129 +1,16 @@
 /**
- * Worker-side web research — no browser runner needed.
- *   webSearch(env, query)      → [{ title, url, snippet, source }]
- *   readPage(url)              → { ok, url, title, text }
- *   researchQueries(env, qs)   → { results, pages, provider }
- *   formatWebBlock(research)   → prompt block with numbered sources
- *
- * Search provider: BRAVE_API_KEY → TAVILY_API_KEY → DuckDuckGo HTML (no key).
- * Used by /chat (auto web when the plan says so) and by /browse `search` / `read` tools.
+ * Plain page fetch + HTML → text. Used only as a fallback for the browse `read` tool
+ * when Anthropic web_fetch can't get a page. Search lives in ./claude-web.js (Claude server tools).
  */
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36 ChaetiBot/1.0";
 
-const SKIP_HOSTS = /(^|\.)(duckduckgo\.com|google\.com|bing\.com|facebook\.com|instagram\.com|tiktok\.com|x\.com|twitter\.com)$/i;
 
 function withTimeout(ms) {
   const c = new AbortController();
   const t = setTimeout(() => c.abort(), ms);
   return { signal: c.signal, clear: () => clearTimeout(t) };
-}
-
-function hostOf(u) {
-  try {
-    return new URL(u).hostname.toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
-export function searchProvider(env) {
-  if (env.BRAVE_API_KEY && String(env.BRAVE_API_KEY).trim()) return "brave";
-  if (env.TAVILY_API_KEY && String(env.TAVILY_API_KEY).trim()) return "tavily";
-  return "duckduckgo";
-}
-
-/** @returns {Promise<Array<{title:string,url:string,snippet:string,source:string}>>} */
-export async function webSearch(env, query, { count = 6 } = {}) {
-  const q = String(query || "").trim();
-  if (!q) return [];
-  const provider = searchProvider(env);
-  try {
-    if (provider === "brave") return await braveSearch(env.BRAVE_API_KEY, q, count);
-    if (provider === "tavily") return await tavilySearch(env.TAVILY_API_KEY, q, count);
-  } catch (e) {
-    // fall through to DDG
-  }
-  try {
-    return await ddgSearch(q, count);
-  } catch {
-    return [];
-  }
-}
-
-async function braveSearch(key, q, count) {
-  const { signal, clear } = withTimeout(10000);
-  try {
-    const res = await fetch(
-      `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=${count}&search_lang=ko&country=KR`,
-      { headers: { Accept: "application/json", "X-Subscription-Token": String(key).trim() }, signal }
-    );
-    if (!res.ok) throw new Error("brave_" + res.status);
-    const data = await res.json();
-    const items = data?.web?.results || [];
-    return items.slice(0, count).map((r) => ({
-      title: String(r.title || "").slice(0, 160),
-      url: String(r.url || ""),
-      snippet: String(r.description || "").replace(/<[^>]+>/g, "").slice(0, 300),
-      source: "brave",
-    }));
-  } finally {
-    clear();
-  }
-}
-
-async function tavilySearch(key, q, count) {
-  const { signal, clear } = withTimeout(12000);
-  try {
-    const res = await fetch("https://api.tavily.com/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_key: String(key).trim(), query: q, max_results: count, search_depth: "basic" }),
-      signal,
-    });
-    if (!res.ok) throw new Error("tavily_" + res.status);
-    const data = await res.json();
-    return (data?.results || []).slice(0, count).map((r) => ({
-      title: String(r.title || "").slice(0, 160),
-      url: String(r.url || ""),
-      snippet: String(r.content || "").slice(0, 300),
-      source: "tavily",
-    }));
-  } finally {
-    clear();
-  }
-}
-
-async function ddgSearch(q, count) {
-  const { signal, clear } = withTimeout(10000);
-  try {
-    const res = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}&kl=kr-kr`, {
-      headers: { "User-Agent": UA, Accept: "text/html" },
-      signal,
-    });
-    if (!res.ok) throw new Error("ddg_" + res.status);
-    const html = await res.text();
-    const out = [];
-    const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>)?/g;
-    let m;
-    while ((m = re.exec(html)) && out.length < count) {
-      let url = decodeEntities(m[1]);
-      const uddg = url.match(/[?&]uddg=([^&]+)/);
-      if (uddg) url = decodeURIComponent(uddg[1]);
-      if (url.startsWith("//")) url = "https:" + url;
-      if (!/^https?:\/\//i.test(url)) continue;
-      out.push({
-        title: stripTags(m[2]).slice(0, 160),
-        url,
-        snippet: stripTags(m[3] || "").slice(0, 300),
-        source: "duckduckgo",
-      });
-    }
-    return out;
-  } finally {
-    clear();
-  }
 }
 
 /* ---------- page reading ---------- */
@@ -193,60 +80,4 @@ export async function readPage(url, { maxChars = 6000, timeoutMs = 12000 } = {})
   } finally {
     clear();
   }
-}
-
-/**
- * Search several queries, dedupe, read the top pages in parallel.
- * @returns {Promise<{results:Array, pages:Array, provider:string, queries:string[]}>}
- */
-export async function researchQueries(env, queries, { perQuery = 5, readTop = 3, pageChars = 3500 } = {}) {
-  const qs = [...new Set((queries || []).map((q) => String(q || "").trim()).filter(Boolean))].slice(0, 3);
-  const provider = searchProvider(env);
-  const lists = await Promise.all(qs.map((q) => webSearch(env, q, { count: perQuery })));
-  const seen = new Set();
-  const results = [];
-  for (const list of lists) {
-    for (const r of list) {
-      const h = hostOf(r.url);
-      if (!r.url || seen.has(r.url) || SKIP_HOSTS.test(h)) continue;
-      seen.add(r.url);
-      results.push(r);
-    }
-  }
-  const toRead = results.slice(0, Math.max(0, readTop));
-  const pages = (await Promise.all(toRead.map((r) => readPage(r.url, { maxChars: pageChars })))).map((p, i) => ({
-    ...p,
-    title: p.title || toRead[i].title,
-    snippet: toRead[i].snippet,
-  }));
-  return { results, pages, provider, queries: qs };
-}
-
-/** Numbered sources block for the system prompt. */
-export function formatWebBlock(research) {
-  if (!research || !research.results?.length) return "";
-  const lines = [
-    `【웹 참고】(방금 검색한 최신 자료. 아래 번호 출처만 근거로 삼고, 없는 사실은 지어내지 마라. 출처끼리 다르면 차이를 말해라)`,
-    `검색어: ${research.queries.join(" / ")}`,
-  ];
-  const pagesByUrl = new Map((research.pages || []).map((p) => [p.url, p]));
-  research.results.slice(0, 8).forEach((r, i) => {
-    const p = pagesByUrl.get(r.url);
-    lines.push(`[${i + 1}] ${r.title || r.url} — ${r.url}`);
-    if (p && p.ok && p.text) lines.push(`    본문: ${p.text.replace(/\n+/g, " ").slice(0, 1800)}`);
-    else if (r.snippet) lines.push(`    요약: ${r.snippet}`);
-  });
-  return lines.join("\n");
-}
-
-/** Compact source list for the API response / UI. */
-export function sourcesForClient(research) {
-  if (!research) return [];
-  const read = new Set((research.pages || []).filter((p) => p.ok).map((p) => p.url));
-  return research.results.slice(0, 8).map((r, i) => ({
-    n: i + 1,
-    title: r.title || r.url,
-    url: r.url,
-    read: read.has(r.url),
-  }));
 }

@@ -6,7 +6,8 @@
 
 import { browserSystemPrompt, TOOL_NAMES } from "./tools.js";
 import { checkGoal, checkAction, extractGoalCredentials, detectCaptcha } from "./safety.js";
-import { webSearch, readPage, searchProvider } from "../web/search.js";
+import { claudeSearch, claudeFetch, webProvider } from "../web/claude-web.js";
+import { readPage } from "../web/search.js";
 import { completeText } from "../llm-text.js";
 import { browserAct, compactObservation } from "./client.js";
 import { planBrowseStep, resolveBrowseLlm } from "./llm.js";
@@ -122,7 +123,7 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
     : "";
   pushStep(steps, {
     type: "think",
-    content: `목표를 확인했어. 검색·읽기·브라우저로 처리할게. (LLM: ${llmInfo.provider} · 검색: ${searchProvider(env)}${credNote})`,
+    content: `목표를 확인했어. 검색·읽기·브라우저로 처리할게. (LLM: ${llmInfo.provider} · 웹: ${webProvider(env)}${credNote})`,
   });
 
   for (let n = 1; n <= maxSteps; n++) {
@@ -340,8 +341,14 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
         let compact;
         if (act.action === "search") {
           const q = String(act.args?.query || "").slice(0, 200);
-          const results = (await webSearch(env, q, { count: 6 })).map((r, i) => ({ n: i + 1, ...r }));
-          compact = { ok: results.length > 0, query: q, results, error: results.length ? undefined : "no_results" };
+          let results = [];
+          let searchErr = "";
+          try {
+            results = await claudeSearch(env, q);
+          } catch (e) {
+            searchErr = String(e && e.message ? e.message : e).slice(0, 100);
+          }
+          compact = { ok: results.length > 0, query: q, results, error: results.length ? undefined : searchErr || "no_results" };
           for (const r of results) noteSource(r.title, r.url);
           pushStep(steps, {
             type: "tool",
@@ -366,8 +373,10 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
           if (!safeOpen.ok) {
             compact = { ok: false, url, error: safeOpen.code, message: safeOpen.message };
           } else {
-            let pg = await readPage(url, { maxChars: 6000 });
-            if (!pg.ok && /empty_or_js_rendered|http_403|http_429|timeout/.test(String(pg.error))) {
+            // 1) Anthropic web_fetch (no runner) → 2) plain fetch → 3) real browser for JS-heavy/bot-walled pages
+            let pg = webProvider(env) === "claude_web" ? await claudeFetch(env, url, { maxChars: 6000 }) : { ok: false, error: "no_claude_web" };
+            if (!pg.ok) pg = await readPage(url, { maxChars: 6000 });
+            if (!pg.ok && /empty_or_js_rendered|http_403|http_429|timeout|url_not_accessible|url_not_allowed/.test(String(pg.error))) {
               // JS-heavy or bot-walled → use the real browser
               const r = await execWithRetry(env, { action: "open", args: { url } }, sid);
               if (r.ok !== false) {

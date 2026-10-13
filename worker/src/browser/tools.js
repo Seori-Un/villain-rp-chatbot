@@ -127,7 +127,7 @@ export const BROWSER_TOOLS = [
     function: {
       name: "search",
       description:
-        "Web search (runs on the server, no browser needed). Returns up to 6 results {n,title,url,snippet}. Use before opening pages for any research/fact question.",
+        "Web search (Anthropic server tool; no browser needed). Returns up to 8 results {n,title,url,snippet}. Use before opening pages for any research/fact question.",
       parameters: {
         type: "object",
         properties: {
@@ -142,7 +142,7 @@ export const BROWSER_TOOLS = [
     function: {
       name: "read",
       description:
-        "Read the main text of a URL (fast server fetch; falls back to the browser for JS-heavy pages). Returns {title,url,text} up to ~6000 chars. Prefer this over open+scroll when you only need the content.",
+        "Read the main text of a URL (Anthropic web_fetch; falls back to the browser for JS-heavy or login-walled pages). Returns {title,url,text} up to ~6000 chars. Prefer this over open+scroll when you only need the content. Use open/click only when you must interact (login, forms, buttons).",
       parameters: {
         type: "object",
         properties: {

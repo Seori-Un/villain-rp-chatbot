@@ -88,7 +88,7 @@ async function handleRequest(request, env, ctx) {
       return json({
         ok: true,
         bot: "채티",
-        version: "chaeti-v1.10-pull-runner",
+        version: "chaeti-v1.11-claude-web",
         chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
@@ -372,7 +372,9 @@ async function handleChat(request, env, ctx) {
   const plan = think
     ? await planTurn(env, { userText: message, history: bot.gen.history, mode: uiMode, timeHint: formatKoreanTime(timeCtx.now, timeCtx.tz) })
     : null;
-  const web = plan ? await runPlanResearch(env, plan) : { block: "", sources: [], thoughts: [], research: null };
+  const web = plan
+    ? await runPlanResearch(env, plan, { question: message, context: bot.gen.history.slice(-2).map((m) => String(m.content || "").slice(0, 120)).join(" / ") })
+    : { block: "", sources: [], thoughts: [], research: null };
 
   // Long-term memory: recall before answering, persist after
   const user_id = cleanUserId(body.user_id);

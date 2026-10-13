@@ -12,10 +12,11 @@
 
 환경변수:
 - `CHAT_THINK=0` 계획 단계 끔 · `CHAT_AUTO_WEB=0` 자동 웹 끔 · `CHAT_THINKING=0` Claude extended thinking 끔
-- 검색 공급자: `BRAVE_API_KEY` → `TAVILY_API_KEY` → 없으면 DuckDuckGo HTML(키 없음, 가끔 막힐 수 있음). 품질/안정성은 Brave 권장 (무료 티어 있음).
+- 웹 공급자 (v1.11): **Anthropic 서버 도구** `web_search_20250305` + `web_fetch_20250910` (`worker/src/web/claude-web.js`). 별도 검색 키 없음. 한 번의 Messages 호출 안에서 검색→읽기→조사 메모까지 끝나고, `pause_turn`이면 이어서 보냄. 출처는 `web_search_tool_result`·`web_fetch_tool_result`·text `citations`에서 모아 `sources[]`로. Anthropic 키가 없을 때만 Gemini `google_search` 그라운딩으로 폴백, 둘 다 없으면 "모른다"로. Brave/Tavily/DDG 경로는 제거됨.
+- 콘솔에서 조직 단위로 web search가 꺼져 있으면 400이 나니, 그때는 Anthropic Console → Settings에서 켜야 함.
 
 ## /browse: 검색 → 읽기 → 비교 → 요약
-- 새 도구 `search(query)`, `read(url)` — 브라우저 없이 Worker에서 바로 실행(빠름). `read`가 JS 렌더링·403 등으로 실패하면 러너 `open` + 새 `read` 액션(본문 전체+링크)으로 폴백.
+- `search(query)` = Claude `web_search`, `read(url)` = Claude `web_fetch` (본문을 그대로 받음). `web_fetch`가 못 읽으면(JS 렌더링·robots·로그인 벽) 일반 fetch → 그래도 안 되면 pull-runner 브라우저 `open`+`read`. 실제 클릭·입력·로그인만 러너를 쓴다.
 - 시스템 프롬프트에 조사 절차 고정: 검색 1~2회 → 출처 2~4개 read → 일치/불일치 비교 → `done`에 결론·근거[n]·출처 URL.
 - 루프가 `done` 없이 끝나면(단계/시간 소진) 읽은 내용으로 **자동 정리**(`synthesizeFromSteps`)해서 답한다.
 - 응답 `sources[]` 추가(프론트 출처 칩), `max_steps` 상한 16, 프론트 기본 12, 벽시계 예산 118s.

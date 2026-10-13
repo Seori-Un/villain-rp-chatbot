@@ -9,7 +9,7 @@
 
 import { completeText } from "./llm-text.js";
 import { extractFirstJsonObject } from "./browser/tools.js";
-import { researchQueries, formatWebBlock, sourcesForClient } from "./web/search.js";
+import { claudeResearch, geminiGroundedResearch, formatWebBlock, sourcesForClient, webProvider } from "./web/claude-web.js";
 
 const PLAN_SYSTEM = `너는 채티의 속마음이다. 채티가 입을 열기 전에 먼저 생각한다. 답을 쓰지 말고 생각만 한다.
 반드시 JSON 한 개만 출력 (설명/마크다운 금지):
@@ -87,23 +87,27 @@ export async function planTurn(env, { userText, history = [], mode = "rp", timeH
  * Stage 1.5: if the plan asked for the web, search + read pages.
  * @returns {Promise<{block:string, sources:Array, thoughts:string[], research:object|null}>}
  */
-export async function runPlanResearch(env, plan) {
+export async function runPlanResearch(env, plan, { question = "", context = "" } = {}) {
   if (!plan || !plan.needs_web || !plan.queries.length) return { block: "", sources: [], thoughts: [], research: null };
   const t0 = Date.now();
   let research = null;
+  let err = "";
+  const provider = webProvider(env);
   try {
-    research = await researchQueries(env, plan.queries, { perQuery: 5, readTop: 3, pageChars: 3500 });
-  } catch {
+    if (provider === "claude_web") research = await claudeResearch(env, { question: question || plan.queries[0], queries: plan.queries, context });
+    else if (provider === "gemini_grounding") research = await geminiGroundedResearch(env, { question: question || plan.queries[0], queries: plan.queries });
+  } catch (e) {
+    err = String(e && e.message ? e.message : e).slice(0, 100);
     research = null;
   }
   const thoughts = [];
-  if (research && research.results.length) {
-    const read = research.pages.filter((p) => p.ok).length;
+  if (research && (research.results.length || research.digest)) {
+    const read = (research.pages || []).filter((p) => p.ok).length;
     thoughts.push(
-      `웹 검색(${research.provider}): "${research.queries.join('", "')}" → ${research.results.length}건, ${read}개 페이지 읽음 (${Math.round((Date.now() - t0) / 100) / 10}s)`
+      `웹 조사(${research.provider}): "${research.queries.join('", "')}" → 출처 ${research.results.length}개${read ? `, ${read}개 페이지 읽음` : ""} (${Math.round((Date.now() - t0) / 100) / 10}s)`
     );
   } else {
-    thoughts.push(`웹 검색을 시도했지만 결과를 못 얻었어 — 아는 범위에서 답할게.`);
+    thoughts.push(`웹에서 찾아보려 했는데 결과를 못 얻었어${err ? ` (${err})` : provider === "none" ? " (웹 도구 키 없음)" : ""} — 모르는 건 모른다고 할게.`);
   }
   return {
     block: formatWebBlock(research),
