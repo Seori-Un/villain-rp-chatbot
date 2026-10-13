@@ -11,6 +11,7 @@ import http from "node:http";
 import { chromium } from "playwright";
 import { loadEnv } from "./env.js";
 import { SessionPool } from "./sessions.js";
+import { startPullLoop } from "./pull.js";
 
 const env = loadEnv();
 const pool = new SessionPool({ headless: env.HEADLESS !== "false" });
@@ -61,6 +62,11 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(env.PORT, env.HOST, () => {
   console.log(`[browser-runner] http://${env.HOST}:${env.PORT}  (Playwright chromium)`);
+  if (env.WORKER_URL) {
+    startPullLoop({ workerUrl: env.WORKER_URL, apiKey: env.BROWSER_API_KEY, pool });
+  } else {
+    console.log("[browser-runner] WORKER_URL not set → expecting the Worker to call this runner through a tunnel (BROWSER_API_URL)");
+  }
 });
 
 function authorize(req, env) {

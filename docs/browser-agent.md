@@ -139,3 +139,24 @@ Worker 인스턴스가 교체되거나 runner가 재시작되면 웹 로그인 �
 
 강제 browse 접두사: `/웹`, `/web`, `/browse`.
 RP 모드에서는 휴리스틱 browse를 끄고, 접두사일 때만 browse합니다.
+
+## 터널 없이 쓰기 (pull 모드, v1.10)
+
+cloudflared(7844)·ngrok 인증이 막힌 망에서는 터널을 못 만든다. 그럴 땐 방향을 뒤집어 **러너가 Worker로 일감을 받으러 간다** — 바깥으로 나가는 HTTPS(443)만 되면 된다.
+
+```
+Worker /browse ──(D1 runner_jobs에 넣고 대기)──┐
+                                               │  GET /runner/next (long-poll 20s)
+러너 PC  npm start  ───────────────────────────┘  POST /runner/result
+```
+
+설정:
+1. Worker: `wrangler.toml` `[vars] BROWSER_MODE = "pull"` (기본으로 들어 있음), D1 마이그레이션 `0003_runner_jobs.sql` 적용, 배포. `BROWSER_API_URL` 시크릿은 없어도 됨.
+2. 러너 `.env`: `WORKER_URL=https://villain-rp-chatbot.e5eeeee.workers.dev`, `BROWSER_API_KEY`는 Worker 시크릿과 동일. `npm start` → 로그에 `[pull] heartbeat ok` 가 뜨면 끝.
+3. 확인: `GET /browse/ping` → `"정상. 러너가 Worker에 붙어 있어 (터널 없음)"`.
+
+액션당 왕복이 0.6~1.2초 늘어난다(큐 폴링). 러너가 45초 이상 안 보이면 `/browse`는 `runner_offline`으로 바로 답한다. 터널 방식으로 돌아가려면 `BROWSER_MODE`를 비우고 `BROWSER_API_URL`을 넣으면 된다.
+
+### 터널을 꼭 쓰고 싶다면 먼저 시도해 볼 것
+- `cloudflared tunnel --protocol http2 --url http://localhost:8788` — 기본 QUIC(UDP 7844) 대신 TCP 443으로 붙는다. UDP/7844만 막힌 망에서는 이걸로 풀린다.
+- 회사/학교 프록시가 있으면 ngrok은 `ngrok.yml`에 `proxy_url`, cloudflared는 `HTTPS_PROXY` 환경변수.

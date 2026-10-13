@@ -3,6 +3,9 @@ main = "src/index.js"
 compatibility_date = "2026-09-01"
 
 [vars]
+# 러너 연결 방식. "pull" = 러너가 Worker로 일감을 받으러 옴 (터널 불필요, D1 필요).
+# 비우면 기존처럼 BROWSER_API_URL(터널 주소)로 Worker가 러너를 호출.
+BROWSER_MODE = "pull"
 # Set secrets via: wrangler secret put KAGGLE_API_BASE
 
 # Optional browser agent (do not put secrets here — use wrangler secret put):

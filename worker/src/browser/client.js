@@ -7,7 +7,10 @@
  * @param {object} env
  * @param {{ action: string, args?: object, session_id?: string }} payload
  */
+import { isPullMode, browserActPull, runnerLastSeen } from "./pull.js";
+
 export async function browserAct(env, payload) {
+  if (isPullMode(env)) return browserActPull(env, payload);
   const base = String(env.BROWSER_API_URL || "").replace(/\/$/, "");
   if (!base) {
     return {
@@ -91,6 +94,21 @@ export function runnerHeaders(env) {
  * Reports: resolved URL, HTTP status, content-type, first bytes, timing, and a plain-Korean diagnosis.
  */
 export async function pingRunner(env) {
+  if (isPullMode(env)) {
+    const seen = await runnerLastSeen(env);
+    const age = seen ? Date.now() - seen.last_seen : null;
+    return {
+      mode: "pull",
+      ok: Boolean(seen && age < 45000),
+      runner_id: seen?.runner_id,
+      last_seen_sec_ago: age != null ? Math.round(age / 1000) : null,
+      diagnosis: !seen
+        ? "pull 모드인데 러너가 한 번도 접속한 적 없어. 러너 .env에 WORKER_URL과 BROWSER_API_KEY를 넣고 `npm start`."
+        : age < 45000
+          ? "정상. 러너가 Worker에 붙어 있어 (터널 없음)."
+          : `러너가 ${Math.round(age / 1000)}초 전 이후로 안 보여. 러너 프로세스가 죽었거나 PC가 잠들었어.`,
+    };
+  }
   const base = String(env.BROWSER_API_URL || "").trim().replace(/\/$/, "");
   const out = { url: base ? base.replace(/\/\/([^@/]+)@/, "//***@") : "", ok: false };
   if (!base) return { ...out, diagnosis: "BROWSER_API_URL 시크릿이 비어 있어. `wrangler secret put BROWSER_API_URL`로 터널 주소(https://…)를 넣어." };

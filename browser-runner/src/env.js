@@ -25,5 +25,7 @@ export function loadEnv() {
     HOST: process.env.HOST || "0.0.0.0",
     BROWSER_API_KEY: process.env.BROWSER_API_KEY || "",
     HEADLESS: process.env.HEADLESS || "true",
+    /** pull mode: Worker URL to fetch jobs from (no tunnel needed) */
+    WORKER_URL: process.env.WORKER_URL || "",
   };
 }

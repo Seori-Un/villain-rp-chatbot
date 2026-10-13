@@ -10,6 +10,7 @@
 import { classifyIntent, normalizeUtterance } from "./intent.js";
 import { handleBrowse, browserHealth } from "./browser/index.js";
 import { pingRunner } from "./browser/client.js";
+import { handleRunnerRoute } from "./browser/pull.js";
 import { routeAgentMode, stripWebPrefix } from "./task.js";
 import {
   formatKoreanTime,
@@ -87,7 +88,7 @@ async function handleRequest(request, env, ctx) {
       return json({
         ok: true,
         bot: "채티",
-        version: "chaeti-v1.9.2-runner-ping",
+        version: "chaeti-v1.10-pull-runner",
         chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
@@ -120,6 +121,8 @@ async function handleRequest(request, env, ctx) {
     if (url.pathname.startsWith("/memory/")) {
       return handleMemory(request, env, ctx, url);
     }
+    const runnerRes = await handleRunnerRoute(request, env, url, json);
+    if (runnerRes) return runnerRes;
     if (url.pathname === "/browse/ping") {
       return json(await pingRunner(env));
     }

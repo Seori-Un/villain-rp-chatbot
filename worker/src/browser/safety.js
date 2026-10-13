@@ -363,5 +363,7 @@ export function checkAction(tool, confirm = {}, context = {}) {
 }
 
 export function isBrowserConfigured(env) {
-  return Boolean(env && env.BROWSER_API_URL && String(env.BROWSER_API_URL).trim());
+  if (!env) return false;
+  if (String(env.BROWSER_MODE || "").toLowerCase() === "pull" && env.DB) return true;
+  return Boolean(env.BROWSER_API_URL && String(env.BROWSER_API_URL).trim());
 }
