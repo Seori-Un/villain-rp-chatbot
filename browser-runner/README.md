@@ -26,6 +26,8 @@ npx wrangler secret put BROWSER_API_KEY   # .env 와 동일
 헬스: `GET /health`  
 액션: `POST /act` `{ "action":"open","url":"https://example.com","session_id":"s1" }`
 
-지원 action: `open` | `screenshot` | `click` | `type` | `scroll` | `close`
+지원 action: `open` | `screenshot` | `click` | `type` | `scroll` | `read`(본문 전체+링크, 스크린샷 없음) | `wait` | `close`
+
+CAPTCHA가 뜨면 Worker가 멈추고 사람이 풀어야 합니다. `HEADLESS=false`로 띄워 두면 그 창에서 바로 풀 수 있고, 세션(쿠키)은 유지됩니다.
 
 클라우드(Browserbase 등)를 쓰면 이 패키지 대신 그쪽 URL을 `BROWSER_API_URL`에 넣으면 됩니다 (계약이 다르면 얇은 어댑터 추가).

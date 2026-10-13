@@ -118,6 +118,45 @@ export class SessionPool {
         await page.waitForTimeout(200);
         return await this.observe(page, false);
       }
+      case "read": {
+        // Full main text (no screenshot) for research; Worker caps what it feeds the LLM.
+        const url = page.url();
+        const title = await page.title().catch(() => "");
+        let text = "";
+        try {
+          text = await page.evaluate(() => {
+            const pick = document.querySelector("article, main, [role=main]") || document.body;
+            for (const sel of ["script", "style", "noscript", "nav", "footer", "header", "aside", "iframe", "svg"]) {
+              pick.querySelectorAll(sel).forEach((el) => el.remove());
+            }
+            return pick.innerText || "";
+          });
+        } catch {
+          text = await page.innerText("body", { timeout: 5000 }).catch(() => "");
+        }
+        text = String(text || "")
+          .split("\n")
+          .map((l) => l.replace(/\s+/g, " ").trim())
+          .filter((l) => l.length > 1)
+          .join("\n")
+          .slice(0, Number(body.max_chars) || 12000);
+        let links = [];
+        try {
+          links = await page.evaluate(() =>
+            Array.from(document.querySelectorAll("a[href]"))
+              .map((a) => ({ text: (a.innerText || "").trim().slice(0, 80), href: a.href }))
+              .filter((l) => l.text && /^https?:/.test(l.href))
+              .slice(0, 40)
+          );
+        } catch {
+          links = [];
+        }
+        return { ok: true, url, title, text, links };
+      }
+      case "wait": {
+        await page.waitForTimeout(Math.min(10000, Number(body.ms) || 1000));
+        return await this.observe(page, false);
+      }
       default:
         return { ok: false, error: "unknown_action", message: String(action) };
     }

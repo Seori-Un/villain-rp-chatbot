@@ -5,7 +5,9 @@
  */
 
 import { browserSystemPrompt, TOOL_NAMES } from "./tools.js";
-import { checkGoal, checkAction, extractGoalCredentials } from "./safety.js";
+import { checkGoal, checkAction, extractGoalCredentials, detectCaptcha } from "./safety.js";
+import { webSearch, readPage, searchProvider } from "../web/search.js";
+import { completeText } from "../llm-text.js";
 import { browserAct, compactObservation } from "./client.js";
 import { planBrowseStep, resolveBrowseLlm } from "./llm.js";
 
@@ -49,10 +51,10 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
     };
   }
 
-  const maxSteps = Math.max(1, Math.min(12, Number(max_steps) || 8));
+  const maxSteps = Math.max(1, Math.min(16, Number(max_steps) || 8));
   const sid = session_id || crypto.randomUUID();
   /** Return JSON before Safari/client typically drops long connections (~150s). */
-  const WALL_BUDGET_MS = 100000;
+  const WALL_BUDGET_MS = 118000;
   const wallStarted = Date.now();
   /** @type {object[]} timeline steps for UI */
   const steps = [];
@@ -78,11 +80,17 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
   let consecutivePlanFails = 0;
 
   const credNote = goalCreds.present
-    ? " · 자격증명 감지됨 — 허용 목록 호스트는 세션당 1회 확인 후 입력"
+    ? " · 자격증명 감지됨 — 호스트당 세션 1회 확인 후 입력 (은행·결제는 차단)"
     : "";
+  /** @type {Array<{n:number,title:string,url:string}>} sources collected via search/read */
+  const sources = [];
+  const noteSource = (title, url) => {
+    if (!url || sources.some((x) => x.url === url)) return;
+    sources.push({ n: sources.length + 1, title: String(title || url).slice(0, 120), url });
+  };
   pushStep(steps, {
     type: "think",
-    content: `목표를 확인했어. 웹을 탐색할게. (선호 LLM: ${llmInfo.provider}${credNote})`,
+    content: `목표를 확인했어. 검색·읽기·브라우저로 처리할게. (LLM: ${llmInfo.provider} · 검색: ${searchProvider(env)}${credNote})`,
   });
 
   for (let n = 1; n <= maxSteps; n++) {
@@ -91,8 +99,9 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
         type: "think",
         content: "시간이 길어져서 여기까지 정리하고 응답할게. 이어서 시키면 이어서 할게.",
       });
-      const partial = buildPartialSummary(steps, maxSteps, page);
+      const partial = (await synthesizeFromSteps(env, goal, steps, sources)) || buildPartialSummary(steps, maxSteps, page);
       return finish({
+        sources,
         ok: true,
         reply:
           "시간이 길어져서 중간에 끊었어. " +
@@ -118,6 +127,7 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
       const msg = String(planErr && planErr.message ? planErr.message : planErr).slice(0, 200);
       pushStep(steps, { type: "think", content: `LLM 호출 오류: ${msg}` });
       return finish({
+        sources,
         ok: false,
         reply: `LLM 호출 중 오류 — ${msg}`,
         steps,
@@ -155,6 +165,7 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
       });
       if (consecutivePlanFails >= 2) {
         return finish({
+          sources,
           ok: false,
           reply: `${n}/${maxSteps} 단계: LLM 계획 실패 — ${planned.error}`,
           steps,
@@ -199,6 +210,7 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
         consecutivePlanFails += 1;
         if (consecutivePlanFails >= 3) {
           return finish({
+            sources,
             ok: false,
             reply: `${n}/${maxSteps} 단계: 도구 JSON 파싱 반복 실패`,
             steps,
@@ -269,6 +281,7 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
           });
         }
         return finish({
+          sources,
           ok: true,
           reply: finalSummary,
           steps,
@@ -283,6 +296,81 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
           modelUsed,
           llmInfo,
         });
+      }
+
+      // ---- server-side research tools (no browser) ----
+      if (act.action === "search" || act.action === "read") {
+        const t0 = Date.now();
+        let compact;
+        if (act.action === "search") {
+          const q = String(act.args?.query || "").slice(0, 200);
+          const results = (await webSearch(env, q, { count: 6 })).map((r, i) => ({ n: i + 1, ...r }));
+          compact = { ok: results.length > 0, query: q, results, error: results.length ? undefined : "no_results" };
+          for (const r of results) noteSource(r.title, r.url);
+          pushStep(steps, {
+            type: "tool",
+            n,
+            tool: "search",
+            args: { query: q },
+            ok: compact.ok,
+            content: `검색 "${q}" → ${results.length}건 (${Date.now() - t0}ms)`,
+            observation: { results: results.map((r) => ({ n: r.n, title: r.title, url: r.url })) },
+          });
+          pushStep(steps, {
+            type: "observe",
+            n,
+            content: results.length
+              ? results.map((r) => `[${r.n}] ${r.title} — ${r.url}`).join("\n")
+              : "검색 결과 없음",
+            ok: compact.ok,
+          });
+        } else {
+          const url = String(act.args?.url || "");
+          const safeOpen = checkAction({ action: "open", args: { url } }, confirmState, { goal, goalCreds });
+          if (!safeOpen.ok) {
+            compact = { ok: false, url, error: safeOpen.code, message: safeOpen.message };
+          } else {
+            let pg = await readPage(url, { maxChars: 6000 });
+            if (!pg.ok && /empty_or_js_rendered|http_403|http_429|timeout/.test(String(pg.error))) {
+              // JS-heavy or bot-walled → use the real browser
+              const r = await execWithRetry(env, { action: "open", args: { url } }, sid);
+              if (r.ok !== false) {
+                const rd = await browserAct(env, { action: "read", args: {}, session_id: sid });
+                const txt = String(rd.text || r.text || "");
+                if (txt.length > 80) pg = { ok: true, url: rd.url || r.url || url, title: rd.title || r.title || "", text: txt.slice(0, 6000), via: "browser" };
+                if (r.url) page.url = r.url;
+                if (r.title) page.title = r.title;
+              }
+            }
+            compact = { ok: pg.ok, url: pg.url, title: pg.title, text: pg.text, error: pg.error, via: pg.via || "fetch" };
+            if (pg.ok) noteSource(pg.title, pg.url);
+          }
+          pushStep(steps, {
+            type: "tool",
+            n,
+            tool: "read",
+            args: { url },
+            ok: compact.ok,
+            content: compact.ok
+              ? `읽기 ${compact.title || url} (${compact.text.length}자 · ${compact.via} · ${Date.now() - t0}ms)`
+              : `읽기 실패 ${url}: ${compact.error}`,
+            observation: { title: compact.title, url: compact.url },
+            error: compact.ok ? undefined : compact.error,
+          });
+          pushStep(steps, {
+            type: "observe",
+            n,
+            content: compact.ok ? `본문: ${compact.text.replace(/\s+/g, " ").slice(0, 220)}…` : `실패 — ${compact.error}`,
+            observation: { title: compact.title, url: compact.url },
+            ok: compact.ok,
+          });
+          if (compact.ok && detectCaptcha(compact)) {
+            compact = { ...compact, captcha: true };
+          }
+        }
+        actionCount += 1;
+        appendToolResult(messages, act, mode, planned, compact);
+        continue;
       }
 
       const safe = checkAction(act, confirmState, {
@@ -311,6 +399,7 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
         if (safe.needs_confirm) {
           needsConfirm = safe.needs_confirm;
           return finish({
+            sources,
             ok: false,
             reply: safe.message,
             steps,
@@ -364,10 +453,35 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
         ok: compact.ok,
       });
 
+      if (compact.ok && detectCaptcha(compact)) {
+        pushStep(steps, {
+          type: "think",
+          content: "CAPTCHA/보안 챌린지가 떴어. 이건 내가 풀지 않아 — 러너 창에서 직접 풀고 같은 목표로 다시 시키면 이어서 할게.",
+        });
+        return finish({
+          sources,
+          ok: false,
+          reply: `보안문자(CAPTCHA)가 나와서 멈췄어${page.url ? ` (${page.url})` : ""}. 브라우저 러너 창에서 직접 풀어 준 뒤 같은 목표로 다시 말해 줘. 세션은 유지돼.`,
+          steps,
+          needsConfirm: null,
+          needsHuman: { type: "captcha", url: page.url || compact.url || "", session_id: sid },
+          mode,
+          sid,
+          maxSteps,
+          n,
+          error: "needs_human_captcha",
+          lastScreenshot,
+          providerUsed,
+          modelUsed,
+          llmInfo,
+        });
+      }
+
       appendToolResult(messages, act, mode, planned, compact);
 
       if (!compact.ok && result.error === "browser_not_configured") {
         return finish({
+          sources,
           ok: false,
           reply:
             "브라우저 러너가 연결되지 않았어. BROWSER_API_URL + browser-runner(또는 Browserbase)를 설정해줘.",
@@ -429,9 +543,10 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
   }
 
   if (!finalSummary) {
-    finalSummary = buildPartialSummary(steps, maxSteps, page);
+    finalSummary = (await synthesizeFromSteps(env, goal, steps, sources)) || buildPartialSummary(steps, maxSteps, page);
   }
   return finish({
+    sources,
     ok: true,
     reply: finalSummary,
     steps,
@@ -446,6 +561,36 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
     modelUsed,
     llmInfo,
   });
+}
+
+/**
+ * When the loop ends without done(): write the comparison/summary ourselves from what was read.
+ * Returns null if nothing substantial was read.
+ */
+async function synthesizeFromSteps(env, goal, steps, sources) {
+  const reads = steps.filter((s) => s.type === "observe" && s.ok && /^본문:/.test(String(s.content || "")));
+  const toolReads = steps.filter((s) => s.type === "tool" && s.tool === "read" && s.ok);
+  if (toolReads.length < 1 && reads.length < 1) return null;
+  const body = steps
+    .filter((s) => (s.type === "observe" && s.ok) || (s.type === "tool" && s.tool === "search"))
+    .map((s) => String(s.content || "").slice(0, 1200))
+    .join("\n---\n")
+    .slice(0, 9000);
+  const srcList = sources.map((x) => `[${x.n}] ${x.title} — ${x.url}`).join("\n");
+  try {
+    const out = await completeText(env, {
+      system:
+        "너는 조사 결과를 정리하는 한국어 비서다. 결론 먼저 2~3문장, 그다음 근거를 출처 번호 [n]과 함께 요점 3~6개로. 출처끼리 다르면 차이를 명시. 모르는 건 모른다고. 마지막 줄에 '출처:' 와 번호별 URL.",
+      user: `목표: ${goal}\n\n수집한 내용:\n${body}\n\n출처 목록:\n${srcList}`,
+      maxTokens: 700,
+      temperature: 0.2,
+      timeoutMs: 15000,
+    });
+    pushStep(steps, { type: "think", content: `읽은 자료를 비교해서 정리했어 (${out.provider}).` });
+    return "(자동 정리) " + out.text.trim();
+  } catch {
+    return null;
+  }
 }
 
 async function execWithRetry(env, act, sid) {
@@ -473,6 +618,8 @@ function summarizeTool(act, compact) {
   if (act.action === "type") return `입력 ${a.selector || ""} ← ${a.text === "***" ? "***" : String(a.text || "").slice(0, 40)}`;
   if (act.action === "scroll") return `스크롤 ${a.direction || "down"}`;
   if (act.action === "screenshot") return "화면 캡처";
+  if (act.action === "search") return `검색 ${a.query || ""}`;
+  if (act.action === "read") return `읽기 ${a.url || ""}`;
   if (!compact.ok) return `실패: ${compact.error || "error"}`;
   return act.action;
 }
@@ -494,10 +641,14 @@ function buildPartialSummary(steps, maxSteps, page) {
   const url = lastObs?.observation?.url || page.url || "";
   let msg = `${maxSteps}/${maxSteps} 단계: 최대 단계에 도달했어. ${tools.length}개 액션 실행.`;
   if (title || url) msg += ` 마지막 페이지${title ? ` 「${title}」` : ""}${url ? ` (${url})` : ""}.`;
+  const reads = steps.filter((s) => s.type === "observe" && s.ok && /^본문:/.test(String(s.content || "")));
+  if (reads.length) msg += ` 읽은 페이지 ${reads.length}개의 내용은 타임라인에 있어.`;
   return msg;
 }
 
 function finish({
+  sources,
+  needsHuman,
   ok,
   reply,
   steps,
@@ -530,6 +681,8 @@ function finish({
     browser: "configured",
     llm: providerUsed || llmInfo?.provider || llmInfo?.note,
     model: modelUsed || undefined,
+    sources: Array.isArray(sources) ? sources : [],
+    needs_human: needsHuman || null,
   };
   if (llmInfo?.provider !== "claude") {
     out.hint_anthropic =

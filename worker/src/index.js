@@ -11,10 +11,12 @@ import { classifyIntent, normalizeUtterance } from "./intent.js";
 import { handleBrowse, browserHealth } from "./browser/index.js";
 import { routeAgentMode, stripWebPrefix } from "./task.js";
 import {
+  formatKoreanTime,
   resolveTimeContext,
   formatTimePromptBlock,
   maybeBoostLateIntent,
 } from "./time.js";
+import { planTurn, runPlanResearch, formatPlanBlock, summarizeRawThinking } from "./think.js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -46,7 +48,7 @@ async function handleRequest(request, env) {
       return json({
         ok: true,
         bot: "채티",
-        version: "secretary-v1.3-live",
+        version: "secretary-v1.4-think-web",
         chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
@@ -207,7 +209,22 @@ async function handleChat(request, env) {
   }
 
   const timeCtx = resolveTimeContext(body, bot.lastMessageAt);
-  const reply = await bot.turn(message, env, timeCtx);
+
+  // Stage 1: think (plan) → Stage 1.5: web if needed → Stage 2: answer
+  const uiMode = String(body.ui_mode || body.mode || "rp").toLowerCase() === "secretary" ? "secretary" : "rp";
+  const think = env.CHAT_THINK !== "0" && !timeCtx.event;
+  const plan = think
+    ? await planTurn(env, { userText: message, history: bot.gen.history, mode: uiMode, timeHint: formatKoreanTime(timeCtx.now, timeCtx.tz) })
+    : null;
+  const web = plan ? await runPlanResearch(env, plan) : { block: "", sources: [], thoughts: [], research: null };
+  const extra = { planBlock: formatPlanBlock(plan), webBlock: web.block, uiMode };
+
+  const reply = await bot.turn(message, env, timeCtx, extra);
+  const thinking = [
+    ...(plan ? plan.thoughts : []),
+    ...web.thoughts,
+    ...(bot.gen.lastThinking ? [`(모델 내부 생각) ${summarizeRawThinking(bot.gen.lastThinking)}`] : []),
+  ];
   return json({
     reply,
     session_id: sessionId,
@@ -215,6 +232,11 @@ async function handleChat(request, env) {
     snapshot: bot.serialize(),
     intent: bot.lastIntent,
     mode: bot.gen.mode,
+    model: bot.gen.lastModel || undefined,
+    thinking,
+    plan: plan ? { provider: plan.provider, model: plan.model, ms: plan.ms, needs_web: plan.needs_web, queries: plan.queries, error: plan.error } : null,
+    sources: web.sources,
+    web: Boolean(web.sources.length),
     time: { tz: timeCtx.tz, now: timeCtx.now, gap_ms: timeCtx.gapMs },
   });
 }
@@ -531,6 +553,9 @@ class ResponseGenerator {
     this.mode = "template";
     this.lastError = null;
     this.lastModel = null;
+    this.lastThinking = "";
+    /** @type {null|{planBlock?:string, webBlock?:string, uiMode?:string}} per-turn plan/web context */
+    this.extra = null;
   }
   salient(agent, k = 3) {
     const now = agent.t;
@@ -693,8 +718,10 @@ ${dirs}
 기억:
 ${memTxt}
 ${timeBlock ? "\n" + timeBlock : ""}
+${this.extra?.planBlock ? "\n" + this.extra.planBlock : ""}
+${this.extra?.webBlock ? "\n" + this.extra.webBlock + "\n웹 참고가 있으면 사실은 거기서만 가져오고, 끝에 '출처 [n]' 식으로 번호를 붙여라. 집착 톤은 유지." : ""}
 
-규칙: 2~6문장 한국어 반말. 반드시 intent=${intent}에 맞게 반응.`;
+규칙: ${this.extra?.webBlock ? "3~8문장" : "2~6문장"} 한국어 반말. 반드시 intent=${intent}에 맞게 반응.`;
   }
   anthropicKey(env) {
     return (
@@ -703,7 +730,23 @@ ${timeBlock ? "\n" + timeBlock : ""}
       ""
     );
   }
-  /** Claude Sonnet — same model list as browse (no tools / no extended thinking for RP speed). */
+  claudeText(data) {
+    return (
+      (Array.isArray(data?.content) ? data.content : [])
+        .filter((b) => b.type === "text")
+        .map((b) => b.text || "")
+        .join("")
+        .trim() || String(data?.content?.[0]?.text || "").trim()
+    );
+  }
+  claudeThinking(data) {
+    return (Array.isArray(data?.content) ? data.content : [])
+      .filter((b) => b.type === "thinking")
+      .map((b) => b.thinking || "")
+      .join("\n")
+      .trim();
+  }
+  /** Claude Sonnet — adaptive extended thinking (CHAT_THINKING=0 to disable). */
   async claude(userText, agent, memories, intent, env, timeCtx) {
     const apiKey = this.anthropicKey(env);
     if (!apiKey) throw new Error("no_anthropic");
@@ -732,13 +775,15 @@ ${timeBlock ? "\n" + timeBlock : ""}
     const models = ["claude-sonnet-5", "claude-sonnet-5-5", "claude-sonnet-4-6"];
     let lastErr = null;
     for (const model of models) {
+      const deep = env.CHAT_THINKING !== "0";
       const body = {
         model,
-        max_tokens: 500,
+        max_tokens: deep ? 4096 : 500,
         temperature: 1.0,
         system: sys,
         messages,
       };
+      if (deep) body.thinking = { type: "adaptive" };
       let res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
@@ -752,8 +797,38 @@ ${timeBlock ? "\n" + timeBlock : ""}
       if (!res.ok) {
         let msg = `claude_${res.status}:${JSON.stringify(data).slice(0, 180)}`;
         lastErr = new Error(msg);
+        // adaptive thinking unsupported → enabled budget → none
+        if (body.thinking && /thinking|adaptive|budget/i.test(msg)) {
+          if (body.thinking.type === "adaptive") body.thinking = { type: "enabled", budget_tokens: 2048 };
+          else delete body.thinking;
+          res = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+            body: JSON.stringify(body),
+          });
+          data = await res.json().catch(() => ({}));
+          if (!res.ok && body.thinking) {
+            delete body.thinking;
+            res = await fetch("https://api.anthropic.com/v1/messages", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+              body: JSON.stringify(body),
+            });
+            data = await res.json().catch(() => ({}));
+          }
+          if (res.ok) {
+            const text = this.claudeText(data);
+            if (text) {
+              this.lastModel = model;
+              this.lastThinking = this.claudeThinking(data);
+              return text;
+            }
+          }
+          msg = `claude_${res.status}:${JSON.stringify(data).slice(0, 180)}`;
+          lastErr = new Error(msg);
+        }
         // Some models reject temperature with certain configs — retry without
-        if (/temperature|top_p|top_k/i.test(msg) && "temperature" in body) {
+        if (!res.ok && /temperature|top_p|top_k/i.test(msg) && "temperature" in body) {
           delete body.temperature;
           res = await fetch("https://api.anthropic.com/v1/messages", {
             method: "POST",
@@ -774,6 +849,7 @@ ${timeBlock ? "\n" + timeBlock : ""}
                 .trim() || String(data?.content?.[0]?.text || "").trim();
             if (text) {
               this.lastModel = model;
+              this.lastThinking = this.claudeThinking(data);
               return text;
             }
             lastErr = new Error("empty_claude:" + model);
@@ -798,6 +874,7 @@ ${timeBlock ? "\n" + timeBlock : ""}
         lastErr = new Error("empty_claude:" + model);
         continue;
       }
+      this.lastThinking = this.claudeThinking(data);
       this.lastModel = model;
       return text;
     }
@@ -834,7 +911,7 @@ ${timeBlock ? "\n" + timeBlock : ""}
           model,
           messages,
           temperature: 1.1,
-          max_tokens: 400,
+          max_tokens: 700,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -890,7 +967,9 @@ ${timeBlock ? "\n" + timeBlock : ""}
     if (!out) throw new Error("empty_gemini");
     return out;
   }
-  async reply(userText, agent, intent, env, timeCtx) {
+  async reply(userText, agent, intent, env, timeCtx, extra = null) {
+    this.extra = extra;
+    this.lastThinking = "";
     const memories = this.salient(agent);
     let out;
     const banned =
@@ -1005,7 +1084,7 @@ class ObsessionChatbot {
     if (intent === "reject") return "reject";
     return "reply";
   }
-  async turn(text, env, timeCtx) {
+  async turn(text, env, timeCtx, extra = null) {
     // Bot-initiated turn (camera/idle event, no user text): neutral affect,
     // never counted as the user ignoring 채티, and does not reset the gap clock.
     const proactive = Boolean(timeCtx && timeCtx.event && !String(text || "").trim());
@@ -1021,7 +1100,7 @@ class ObsessionChatbot {
       intent,
       valence: rec.rpe,
     });
-    const out = await this.gen.reply(proactive ? `(${timeCtx.event})` : text, this.agent, intent, env, timeCtx);
+    const out = await this.gen.reply(proactive ? `(${timeCtx.event})` : text, this.agent, intent, env, timeCtx, extra);
     if (!proactive) this.lastMessageAt = (timeCtx && timeCtx.now) || Date.now();
     return out;
   }

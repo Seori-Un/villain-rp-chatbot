@@ -388,3 +388,35 @@ code { color: #cfc8c0; }
   bottom: 0;
   right: 0;
 }
+
+/* ---------- thinking summary on chat replies + sources ---------- */
+.bubble.bot .chat-thinking { margin: 0 0 0.45rem; }
+.bubble.bot .chat-thinking summary { font-size: 0.78rem; color: var(--muted); cursor: pointer; }
+.bubble.bot .chat-thinking .browse-steps { font-size: 0.78rem; }
+.thinking-pending { color: var(--muted); font-style: italic; }
+.chat-reply-text { white-space: pre-wrap; }
+.sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+  margin-top: 0.5rem;
+  padding-top: 0.4rem;
+  border-top: 1px dashed #2a2a2e;
+}
+.sources-label { font-size: 0.72rem; color: var(--muted); margin-right: 0.15rem; }
+.source-chip {
+  font-size: 0.72rem;
+  color: #d4b896;
+  background: #1a1610;
+  border: 1px solid #3a3022;
+  border-radius: 999px;
+  padding: 0.12rem 0.55rem;
+  text-decoration: none;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-chip.read { border-color: #5a4a22; }
+.source-chip:hover { color: var(--ink); }

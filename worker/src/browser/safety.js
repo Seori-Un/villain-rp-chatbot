@@ -32,7 +32,7 @@ export const DEV_LOGIN_ALLOWLIST = [
 ];
 
 const PAYMENT_HOST =
-  /(paypal\.|stripe\.|checkout\.|pay\.|billing\.|bank\.|banking\.|kakao\.?pay|naver\.?pay|toss\.?payments|card\.|visa\.|mastercard\.|americanexpress\.|wellsfargo|chase\.com|bankofamerica|citibank|usbank|capitalone|ally\.com|discover\.com)/i;
+  /(paypal\.|stripe\.|checkout\.|pay\.|billing\.|bank\.|banking\.|kakao\.?pay|naver\.?pay|toss\.?payments|tossbank|kakaobank|kbank\.|card\.|visa\.|mastercard\.|americanexpress\.|wellsfargo|chase\.com|bankofamerica|citibank|usbank|capitalone|ally\.com|discover\.com|shinhan\.|kbstar\.|kookmin|wooribank|woori\.|hanabank|kebhana|nonghyup|nhbank|ibk\.|busanbank|dgb\.|citibank\.co\.kr|samsungcard|hyundaicard|lottecard|bccard|kbcard|shinhancard|nhcard|hanacard|wooricard|upbit|bithumb|coinone|korbit|gopax)/i;
 
 const PAYMENT_PATH = /(\/checkout|\/cart\/?pay|\/payment|\/billing|\/wallet|\/transfer|\/wire)/i;
 
@@ -55,12 +55,24 @@ const GOV_ID_ABUSE =
  * Normalize hostname and test allowlist (exact or subdomain of allowlisted apex).
  * @param {string} hostname
  */
+/**
+ * Login policy (2026-10): logins are allowed on every site EXCEPT banking / payment / crypto.
+ * DEV_LOGIN_ALLOWLIST is kept for documentation + `allowlisted` flag; it no longer restricts.
+ * Password fill still needs one confirm per host per session (see checkAction).
+ */
 export function hostAllowedForLogin(hostname) {
   const h = String(hostname || "")
     .toLowerCase()
     .replace(/\.$/, "");
   if (!h) return false;
-  return DEV_LOGIN_ALLOWLIST.some((allowed) => h === allowed || h.endsWith("." + allowed));
+  if (PAYMENT_HOST.test(h) || CRYPTO_HOST.test(h)) return false;
+  return true;
+}
+
+/** CAPTCHA / bot-challenge detection on an observation. We never try to solve these. */
+export function detectCaptcha(obs) {
+  const t = `${obs?.title || ""} ${String(obs?.text || "").slice(0, 1500)} ${obs?.url || ""}`;
+  return /(captcha|hcaptcha|recaptcha|보안\s*문자|자동\s*입력\s*방지|로봇이\s*아닙니다|i'?m not a robot|verify you are human|사람인지\s*확인|checking your browser|just a moment|challenge-platform|cf-chl|attention required)/i.test(t);
 }
 
 /**

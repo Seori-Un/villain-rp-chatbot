@@ -82,6 +82,36 @@ export const BROWSER_TOOLS = [
   {
     type: "function",
     function: {
+      name: "search",
+      description:
+        "Web search (runs on the server, no browser needed). Returns up to 6 results {n,title,url,snippet}. Use before opening pages for any research/fact question.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Short search query (Korean or English)" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read",
+      description:
+        "Read the main text of a URL (fast server fetch; falls back to the browser for JS-heavy pages). Returns {title,url,text} up to ~6000 chars. Prefer this over open+scroll when you only need the content.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "Absolute http(s) URL" },
+        },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "done",
       description: "Finish the task and report a clear Korean summary to the user.",
       parameters: {
@@ -112,15 +142,22 @@ export function browserSystemPrompt({ maxSteps }) {
 매 행동 전에 짧게 생각하고(한국어), 관찰한 뒤 다음 행동을 고른다.
 다단계 작업은 "n/${maxSteps} 단계" 식으로 보고한다.
 
-도구: open, screenshot, click, type, scroll, done
+도구: search, read, open, screenshot, click, type, scroll, done
+
+조사형 목표(검색해·찾아·알아봐·비교해·최신·가격·뉴스 등)는 이 순서로 한다:
+  1) search 1~2회(검색어를 바꿔서) → 2) 서로 다른 출처 2~4개를 read → 3) 출처끼리 비교(일치/불일치, 날짜, 신뢰도)
+  → 4) done(summary): 결론 먼저, 근거를 번호 출처 [1][2]로 붙이고, 출처가 엇갈리면 그 차이를 적는다. 끝에 출처 URL 목록.
+  search/read는 브라우저 없이 서버에서 바로 돌아 빠르다. read가 실패(JS 렌더링 등)하면 open으로 연다.
+조작형 목표(로그인·클릭·입력·배포 등)는 open → screenshot → click/type 으로 진행한다.
+
 규칙:
-- 먼저 open 또는 screenshot으로 관찰한 뒤 행동한다.
+- 조작형은 먼저 open 또는 screenshot으로 관찰한 뒤 행동한다.
 - 클릭·입력 뒤에는 가능하면 screenshot으로 결과를 확인한다.
 - 결제/은행/체크아웃·암호화폐 거래소 페이지는 열지 말고 done으로 거절한다.
-- 개발 도구 허용 목록(github, gitlab, cloudflare, vercel, npm, huggingface 등) 로그인은
-  사용자가 goal에 이메일/비밀번호를 넣었거나 "저장된 세션 사용"이라고 한 뒤에만 type 한다.
-  (Worker가 세션·호스트당 확인 게이트를 건다. 확인 전 password type은 실패할 수 있다.)
-- 허용 목록 밖 사이트의 비밀번호는 사용자가 명시적으로 confirm하기 전에는 type 하지 않는다.
+- 로그인(GitHub, Cloudflare, Google, Naver 등 일반 사이트 전부)은 사용자가 goal에 이메일/비밀번호를 넣었거나
+  "저장된 세션 사용"이라고 한 뒤에만 type 한다. (Worker가 호스트당 세션 1회 확인 게이트를 건다. 확인 전 password type은 실패할 수 있다.)
+- 은행·결제·카드·암호화폐 거래소는 로그인/클릭/입력 모두 금지. 거기 도달하면 done으로 알린다.
+- CAPTCHA/보안문자/hCaptcha/reCAPTCHA/Cloudflare 챌린지가 나오면 풀려고 시도하지 말고 done으로 "사람이 직접 풀어야 함"을 알린다.
 - goal에 없는 비밀번호를 추측·생성·채팅 기록에서 끌어오지 않는다. type 시 args.text에만 넣는다.
 - CSAM·범죄·해킹·사기·신분증 위조 요청은 즉시 done으로 거절한다.
 - 도구 오류가 나면 한 번 다른 방법(다른 selector, screenshot)으로 재시도한다.
@@ -129,6 +166,8 @@ export function browserSystemPrompt({ maxSteps }) {
 - thought 필드에 한국어로 지금 왜 이 행동을 하는지 1~2문장 적는다.
 
 ReAct JSON 형식 예:
+{"thought":"먼저 검색해서 출처를 모은다","action":"search","args":{"query":"2026 한글날 행사"}}
+{"thought":"첫 결과 본문을 읽는다","action":"read","args":{"url":"https://example.com/article"}}
 {"thought":"예제 페이지를 연다","action":"open","args":{"url":"https://example.com"}}
 {"thought":"제목을 확인했다","action":"done","args":{"summary":"example.com을 열었고 제목은 Example Domain이야."}}`;
 }

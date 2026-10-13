@@ -40,8 +40,8 @@ let pendingBrowseConfirm = null;
 
 /** Safari/long /browse: AbortSignal + Korean errors (avoid raw "Load failed") */
 const BROWSE_TIMEOUT_MS = 150000; // 150s — generous but before silent drop
-const CHAT_TIMEOUT_MS = 90000;
-const BROWSE_MAX_STEPS = 8; // shorter Worker wall time by default
+const CHAT_TIMEOUT_MS = 140000; // plan → (web) → answer with thinking can take a while
+const BROWSE_MAX_STEPS = 12; // search→read→compare needs more steps
 
 
 /* ---------- time sense (client clock → Worker system prompt) ---------- */
@@ -69,6 +69,8 @@ const TOOL_KO = {
   type: "입력",
   scroll: "스크롤",
   screenshot: "캡처",
+  search: "검색",
+  read: "읽기",
   done: "끝",
 };
 
@@ -225,7 +227,7 @@ function summarizeSteps(steps) {
   return steps.map((s) => {
     const out = {
       type: s.type || inferType(s),
-      content: (s.content || "").toString().slice(0, 400),
+      content: (s.content || "").toString().slice(0, 600),
       tool: s.tool || s.action,
       ok: s.ok,
       n: s.n,
@@ -396,7 +398,75 @@ function buildTimelineEl(steps, meta) {
   return details;
 }
 
-function addBrowseReply(reply, steps, meta, isErr) {
+/** Clickable source list (chat web answers + browse research) */
+function buildSourcesEl(sources) {
+  if (!Array.isArray(sources) || !sources.length) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "sources";
+  const label = document.createElement("span");
+  label.className = "sources-label";
+  label.textContent = "출처";
+  wrap.appendChild(label);
+  for (const s of sources.slice(0, 8)) {
+    const a = document.createElement("a");
+    a.href = s.url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.className = "source-chip" + (s.read ? " read" : "");
+    let host = "";
+    try {
+      host = new URL(s.url).hostname.replace(/^www\./, "");
+    } catch {}
+    a.textContent = `[${s.n}] ${host || s.title}`;
+    a.title = s.title || s.url;
+    wrap.appendChild(a);
+  }
+  return wrap;
+}
+
+/** Thinking summary for a /chat reply (plan → web → answer), shown collapsed above the bubble */
+function buildChatThinkingEl(thinking, meta) {
+  if (!Array.isArray(thinking) || !thinking.length) return null;
+  const details = document.createElement("details");
+  details.className = "inline-thinking chat-thinking";
+  details.open = Boolean(meta && meta.open);
+  const summary = document.createElement("summary");
+  const bits = [`${thinking.length}단계`];
+  if (meta?.web) bits.push("웹 검색");
+  if (meta?.model) bits.push(meta.model);
+  summary.innerHTML = `생각 <span class="think-meta">${escapeHtml(bits.join(" · "))}</span>`;
+  details.appendChild(summary);
+  const ol = document.createElement("ol");
+  ol.className = "browse-steps";
+  for (const t of thinking) {
+    const li = document.createElement("li");
+    const isWeb = /^웹 검색/.test(t);
+    const isModel = /^\(모델 내부 생각\)/.test(t);
+    li.className = isWeb ? "step-tool step-ok" : "step-think";
+    li.innerHTML = `<span class="step-label">${isWeb ? "검색" : isModel ? "모델" : "생각"}</span>${escapeHtml(t.replace(/^\(모델 내부 생각\)\s*/, ""))}`;
+    ol.appendChild(li);
+  }
+  details.appendChild(ol);
+  return details;
+}
+
+function addChatReply(reply, thinking, sources, meta, isErr, scroll = true) {
+  const wrap = document.createElement("div");
+  wrap.className = "bubble bot" + (isErr ? " err" : "");
+  const th = buildChatThinkingEl(thinking, meta);
+  if (th) wrap.appendChild(th);
+  const text = document.createElement("div");
+  text.className = "chat-reply-text";
+  text.textContent = reply;
+  wrap.appendChild(text);
+  const src = buildSourcesEl(sources);
+  if (src) wrap.appendChild(src);
+  log.appendChild(wrap);
+  if (scroll) log.scrollTop = log.scrollHeight;
+  return wrap;
+}
+
+function addBrowseReply(reply, steps, meta, isErr, sources) {
   const wrap = document.createElement("div");
   wrap.className = "bubble browse" + (isErr ? " err" : "");
   if (steps && steps.length) {
@@ -406,6 +476,8 @@ function addBrowseReply(reply, steps, meta, isErr) {
   text.className = "browse-reply-text";
   text.textContent = reply;
   wrap.appendChild(text);
+  const src = buildSourcesEl(sources);
+  if (src) wrap.appendChild(src);
   log.appendChild(wrap);
   log.scrollTop = log.scrollHeight;
   return wrap;
@@ -449,7 +521,9 @@ function showBrowseConfirm(data, goal) {
     messages = store.messages.slice(-60);
     for (const m of messages) {
       if (m.kind === "browse" && m.role === "assistant") {
-        addBrowseReply(m.content, m.steps || [], m.meta || {}, false);
+        addBrowseReply(m.content, m.steps || [], m.meta || {}, false, m.sources || []);
+      } else if (m.role === "assistant" && (m.thinking?.length || m.sources?.length)) {
+        addChatReply(m.content, m.thinking || [], m.sources || [], m.meta || {}, false, false);
       } else if (m.role === "user") {
         addBubble(m.content, "user", false);
       } else {
@@ -504,7 +578,13 @@ async function runChatTurn(message, opts = {}) {
   }
   const btn = form.querySelector("button");
   btn.disabled = true;
-  const pending = addBubble("…", "bot");
+  const pending = addBubble("생각하는 중…", "bot");
+  pending.classList.add("thinking-pending");
+  const tp0 = performance.now();
+  const thinkTimer = setInterval(() => {
+    const sec = Math.round((performance.now() - tp0) / 1000);
+    pending.textContent = sec < 6 ? "생각하는 중…" : sec < 20 ? `생각하는 중… (${sec}초)` : `자료 찾아보는 중… (${sec}초)`;
+  }, 1000);
   let replyOut = null;
   try {
     const { res, data } = await fetchJson(
@@ -524,6 +604,7 @@ async function runChatTurn(message, opts = {}) {
             .slice(-24),
           session_id: sessionId || undefined,
           snapshot: snapshot || undefined,
+          ui_mode: uiMode,
           ...timePayload,
           ...live,
           voice: Boolean(opts.voice || live.voice),
@@ -536,9 +617,13 @@ async function runChatTurn(message, opts = {}) {
     if (data.session_id) sessionId = data.session_id;
     if (data.snapshot) snapshot = data.snapshot;
     const reply = data.reply || data.error || "응답이 비었네.";
-    pending.textContent = reply;
-    if (!res.ok) pending.classList.add("err");
-    else replyOut = reply;
+    clearInterval(thinkTimer);
+    const thinking = Array.isArray(data.thinking) ? data.thinking.map((t) => String(t).slice(0, 400)) : [];
+    const sources = Array.isArray(data.sources) ? data.sources : [];
+    const chatMeta = { model: data.model, web: Boolean(data.web), open: false };
+    pending.remove();
+    const replyEl = addChatReply(reply, thinking, sources, chatMeta, !res.ok);
+    if (res.ok) replyOut = reply;
     showState(data.state);
     if (window.ChaetiLive) window.ChaetiLive.onReply(reply, data.state || null, res.ok);
     if (message.trim() === "/reset") {
@@ -548,10 +633,11 @@ async function runChatTurn(message, opts = {}) {
       addBubble(reply, "bot");
       messages.push({ role: "assistant", content: reply, kind: "chat", ts: Date.now() });
     } else if (isEvent || !message.startsWith("/")) {
-      messages.push({ role: "assistant", content: reply, kind: "chat", ts: Date.now() });
+      messages.push({ role: "assistant", content: reply, kind: "chat", ts: Date.now(), thinking, sources, meta: chatMeta });
     }
     persist();
   } catch (err) {
+    clearInterval(thinkTimer);
     const c = classifyFetchError(err);
     pending.textContent = c.kind === "timeout"
       ? "채팅 응답이 너무 늦어서 타임아웃됐어. 다시 보내 줘."
@@ -670,6 +756,7 @@ async function runBrowseTurn(goal, opts = {}) {
     if (data.session_id) browseSessionId = data.session_id;
 
     const steps = Array.isArray(data.steps) ? data.steps : [];
+    const browseSources = Array.isArray(data.sources) ? data.sources : [];
     lastBrowseSteps = steps;
     const meta = { llm: data.llm, model: data.model, ms };
     const reply =
@@ -691,6 +778,9 @@ async function runBrowseTurn(goal, opts = {}) {
         (host ? `: ${host}` : "") +
         ". 아래 「로그인 허용하고 계속」을 눌러줘)";
       showBrowseConfirm(data, goal);
+    } else if (data.needs_human && data.needs_human.type === "captcha") {
+      isErr = true;
+      hideBrowseConfirm();
     } else if (!res.ok || data.ok === false) {
       isErr = true;
       hideBrowseConfirm();
@@ -702,13 +792,14 @@ async function runBrowseTurn(goal, opts = {}) {
       hideBrowseConfirm();
     }
 
-    addBrowseReply(finalReply, steps, meta, isErr);
+    addBrowseReply(finalReply, steps, meta, isErr, browseSources);
     messages.push({
       role: "assistant",
       content: finalReply,
       kind: "browse",
       steps: summarizeSteps(steps),
       meta,
+      sources: browseSources.slice(0, 8),
     });
     persist();
   } catch (err) {
