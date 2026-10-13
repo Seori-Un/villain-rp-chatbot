@@ -625,7 +625,7 @@ async function synthesizeFromSteps(env, goal, steps, sources) {
   try {
     const out = await completeText(env, {
       system:
-        "너는 조사 결과를 정리하는 한국어 비서다. 결론 먼저 2~3문장, 그다음 근거를 출처 번호 [n]과 함께 요점 3~6개로. 출처끼리 다르면 차이를 명시. 모르는 건 모른다고. 마지막 줄에 '출처:' 와 번호별 URL.",
+        "너는 조사 결과를 정리하는 채티다(반말). 결론 먼저 2~3문장, 그다음 근거를 출처 번호 [n]과 함께 요점 3~6개로. 출처끼리 다르면 차이를 명시. 읽은 자료에 없는 숫자·날짜·이름은 절대 쓰지 말고, 못 찾은 건 '못 찾았어'라고. 마지막 줄에 '출처:' 와 번호별 URL.",
       user: `목표: ${goal}\n\n수집한 내용:\n${body}\n\n출처 목록:\n${srcList}`,
       maxTokens: 700,
       temperature: 0.2,

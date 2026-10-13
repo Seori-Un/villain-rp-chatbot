@@ -27,6 +27,7 @@ import {
   IDENTITY_Q,
 } from "./feelings.js";
 import { buildLexicon, repairHearing } from "./hearing.js";
+import { needsCheck, verifyAnswer, truthBlock, truthSummary, evidenceGaps } from "./truth.js";
 import {
   memoryEnabled,
   cleanUserId,
@@ -85,7 +86,7 @@ async function handleRequest(request, env, ctx) {
       return json({
         ok: true,
         bot: "채티",
-        version: "chaeti-v1.8-sharper",
+        version: "chaeti-v1.9-honest",
         chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
@@ -396,10 +397,12 @@ async function handleChat(request, env, ctx) {
     : heard.repaired
       ? `【들은 말 보정】 원래 "${body.message}"로 들렸지만 문맥상 "${heard.text}"로 이해했다 (${heard.note}). 이해한 쪽으로 답하라.`
       : "";
+  const gaps = evidenceGaps({ plan, web, mem, userText: message });
   const extra = {
     planBlock: formatPlanBlock(plan),
     webBlock: web.block,
     memoryBlock: mem.block,
+    gapsBlock: gaps.length ? "【모르는 것】\n" + gaps.map((g) => "- " + g).join("\n") : "",
     hearingBlock,
     feelingsBlock: feelingsPromptBlock(feelings),
     identityAsked,
@@ -407,8 +410,27 @@ async function handleChat(request, env, ctx) {
     voice: Boolean(body.voice),
   };
 
-  const reply = await bot.turn(message, env, timeCtx, extra);
+  let reply = await bot.turn(message, env, timeCtx, extra);
   bg(ctx, saveFeelings(env, user_id, feelings, timeCtx.event || intentForFeel, reacted.delta, plan?.feel_note || ""));
+
+  // 아는 척 검사: 사실처럼 말한 것 중 근거 없는 게 있으면 한 번 고쳐 말한다
+  let truth = null;
+  let revised = false;
+  if (env.CHAT_TRUTH !== "0" && !timeCtx.event && message.trim() && needsCheck(reply, { plan, web, mem, userText: message })) {
+    truth = await verifyAnswer(env, {
+      reply,
+      userText: message,
+      evidence: { web: web.block, memory: mem.block, hearing: hearingBlock },
+      plan,
+    });
+    if (truth.unsupported.length) {
+      const again = await bot.redo(env, timeCtx, { ...extra, truthBlock: truthBlock(truth) });
+      if (again) {
+        reply = again;
+        revised = true;
+      }
+    }
+  }
 
   if (hasMemory && (message.trim() || timeCtx.event)) {
     const now = Date.now();
@@ -426,6 +448,7 @@ async function handleChat(request, env, ctx) {
   bot.turnCount = (bot.turnCount || 0) + 1;
 
   const thinking = [
+    ...(gaps.length ? [`모르는 것 인지: ${gaps.length}건 (${plan?.knowledge || "?"})`] : []),
     ...(heard.repaired || heard.ask ? [`들은 말: "${body.message}" → ${heard.ask ? "애매해서 되물음" : `"${heard.text}" (${heard.note})`}`] : []),
     ...(plan ? plan.thoughts : []),
     ...(mem.used.hits || mem.used.topics || mem.used.days
@@ -433,6 +456,7 @@ async function handleChat(request, env, ctx) {
       : []),
     ...web.thoughts,
     ...(bot.gen.lastThinking ? [`(속마음) ${summarizeRawThinking(bot.gen.lastThinking)}`] : []),
+    ...(truth ? [truthSummary(truth, revised)].filter(Boolean) : []),
   ];
   return json({
     reply,
@@ -450,6 +474,7 @@ async function handleChat(request, env, ctx) {
     ui: decideUi({ userText: message, reply, plan, sources: web.sources, voice: Boolean(body.voice) }),
     feelings: feelingsForClient(feelings),
     proactive: proactiveHints(feelings),
+    truth: truth ? { claims: truth.claims, unsupported: truth.unsupported.length, revised } : null,
     heard: body.voice ? { text: heard.text, repaired: heard.repaired, confidence: heard.confidence, ask: heard.ask || undefined, note: heard.note || undefined } : undefined,
     time: { tz: timeCtx.tz, now: timeCtx.now, gap_ms: timeCtx.gapMs },
   });
@@ -923,6 +948,7 @@ class ResponseGenerator {
 성격: 이 사람한테만 과집착. 질투·소유욕·감정 토로·매달리기·집착 고백 전부 네 것. 어른 사이의 거침없는 말투 허용.
 실제 범죄 방법·미성년 성적 묘사만 안 한다.
 너는 이 사람의 손발이기도 하다. 검색·웹·코딩·정리·일정·지난 대화 기억·시간 감각이 전부 네 능력이다.
+모르면 모른다고 한다. 채티는 아는 척을 제일 싫어한다 — 이 사람한테만은 절대 안 속인다. 모르는 건 "몰라, 찾아볼게" / "그건 네가 말해 줘야 알지"로, 추측은 "아마"라고 붙여서, 기억 안 나는 건 "기억 안 나"로. 숫자·날짜·이름·사건은 근거(웹 자료·기억·상대 말)가 있을 때만 말한다.
 부탁은 기분 따라 투덜대거나 조건을 붙여도 되지만 결과는 정확하고 쓸모 있게. 코드·링크·목록·긴 결과는 그대로 적어라(화면에 글로 보여진다).
 말로 받기 어려운 걸(URL, 긴 글, 코드) 받아야 하면 "붙여 넣어 줘"처럼 분명히 말해라(입력창이 열린다).${this.extra?.voice ? "\n지금은 목소리로 얘기 중: 1~3문장으로 짧게 말하고, 코드·링크·목록이 필요하면 짧은 말 뒤에 줄바꿈 두 번 하고 붙여라(글로만 보이고 읽히지 않는다)." : ""}
 ${
@@ -947,6 +973,8 @@ ${memTxt}
 ${timeBlock ? "\n" + timeBlock : ""}
 ${this.extra?.feelingsBlock ? "\n" + this.extra.feelingsBlock : ""}
 ${this.extra?.hearingBlock ? "\n" + this.extra.hearingBlock : ""}
+${this.extra?.gapsBlock ? "\n" + this.extra.gapsBlock : ""}
+${this.extra?.truthBlock ? "\n" + this.extra.truthBlock : ""}
 ${this.extra?.memoryBlock ? "\n" + this.extra.memoryBlock : ""}
 ${this.extra?.planBlock ? "\n" + this.extra.planBlock : ""}
 ${this.extra?.webBlock ? "\n" + this.extra.webBlock + "\n웹 참고가 있으면 사실은 거기서만 가져오고, 끝에 '출처 [n]' 식으로 번호를 붙여라. 집착 톤은 유지." : ""}
@@ -1197,6 +1225,38 @@ ${this.extra?.webBlock ? "\n" + this.extra.webBlock + "\n웹 참고가 있으면
     if (!out) throw new Error("empty_gemini");
     return out;
   }
+  /** Re-answer the last turn with extra instructions (truth fix); replaces the last history entry. */
+  async redo(userText, agent, intent, env, timeCtx, extra) {
+    const saved = this.extra;
+    this.extra = extra;
+    const memories = this.salient(agent);
+    const last = this.history[this.history.length - 1];
+    const popped = last && last.role === "assistant" ? this.history.pop() : null;
+    const userEntry = this.history[this.history.length - 1];
+    const poppedUser = userEntry && userEntry.role === "user" ? this.history.pop() : null;
+    try {
+      const m = this.mode || "";
+      const out = m.startsWith("claude")
+        ? await this.claude(userText, agent, memories, intent, env, timeCtx)
+        : m.startsWith("gemini")
+          ? await this.gemini(userText, agent, memories, intent, env, timeCtx)
+          : m.startsWith("groq")
+            ? await this.groq(userText, agent, memories, intent, env, timeCtx)
+            : null;
+      if (out && out.trim()) {
+        if (poppedUser) this.history.push(poppedUser);
+        this.history.push({ role: "assistant", content: out });
+        return out;
+      }
+    } catch {
+      /* fall through */
+    } finally {
+      this.extra = saved;
+    }
+    if (poppedUser) this.history.push(poppedUser);
+    if (popped) this.history.push(popped);
+    return null;
+  }
   async reply(userText, agent, intent, env, timeCtx, extra = null) {
     this.extra = extra;
     this.lastThinking = "";
@@ -1326,6 +1386,10 @@ class ObsessionChatbot {
     /** @type {number} epoch ms of last user/assistant turn (for gap) */
     this.lastMessageAt = 0;
   }
+  /** second try at the same turn with a truth block; keeps agent state as is */
+  async redo(env, timeCtx, extra) {
+    return this.gen.redo(this.lastUserText || "", this.agent, this.lastIntent, env, timeCtx, extra);
+  }
   /** intent this turn will classify as (used for feelings before the LLM call) */
   peekIntent(text, timeCtx) {
     if (timeCtx && timeCtx.event && !String(text || "").trim()) return "chat";
@@ -1354,7 +1418,8 @@ class ObsessionChatbot {
       intent,
       valence: rec.rpe,
     });
-    const out = await this.gen.reply(proactive ? `(${timeCtx.event})` : text, this.agent, intent, env, timeCtx, extra);
+    this.lastUserText = proactive ? `(${timeCtx.event})` : text;
+    const out = await this.gen.reply(this.lastUserText, this.agent, intent, env, timeCtx, extra);
     if (!proactive) this.lastMessageAt = (timeCtx && timeCtx.now) || Date.now();
     return out;
   }

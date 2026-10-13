@@ -439,12 +439,16 @@ export async function recall(env, { user_id, conv_id, text, memory_query = "", n
     }
   }
 
-  if (!lines.length) return empty;
+  const asked = PAST_REF.test(text) || Boolean(memory_query);
+  if (asked && !fts.hits.length && !topicHits.length && !(range && lines.some((l) => l.startsWith("기간")))) {
+    lines.push("상대가 예전 일을 묻는 것 같은데, 그 내용은 저장된 기억에 없다. 기억난다고 하지 말고 솔직하게 말해라.");
+  }
+  if (!lines.length) return { ...empty, asked };
   const block = [
     "【기억】(서버에 저장된 이 유저와의 과거 대화. 여기 있는 것만 '기억한다'고 말하고, 없는 건 지어내지 마라. 자연스럽게 녹여라)",
     ...lines,
   ].join("\n");
-  return { block, items, used: { days: recent.length, hits: fts.hits.length, topics: topicHits.length } };
+  return { block, items, asked, used: { days: recent.length, hits: fts.hits.length, topics: topicHits.length } };
 }
 
 /* ---------------------------------------------------------------- digest (LLM) */

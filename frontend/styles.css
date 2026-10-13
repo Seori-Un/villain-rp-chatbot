@@ -603,3 +603,18 @@ button[type="submit"] { border-radius: 999px; background: linear-gradient(135deg
 
 /* ASR repair: what was heard vs understood */
 .heard-raw { color: var(--muted); text-decoration: line-through; text-decoration-color: #5a4a3a; margin-right: 0.2rem; }
+
+/* fact-check chip under replies */
+.truth { margin-top: 0.4rem; font-size: 0.72rem; }
+.truth summary { cursor: pointer; display: inline-block; border-radius: 999px; padding: 0.1rem 0.55rem; border: 1px solid #2a2a2e; color: var(--muted); list-style: none; }
+.truth summary::-webkit-details-marker { display: none; }
+.truth summary.truth-ok { color: #8fcfae; border-color: #2f5f4a; }
+.truth summary.truth-fixed { color: #e0c070; border-color: #5a4a22; }
+.truth summary.truth-warn { color: #e08a7a; border-color: #5a2f2a; }
+.truth ul { margin: 0.35rem 0 0; padding-left: 1rem; color: #cfc9c0; }
+.truth li { margin: 0.15rem 0; }
+.truth b { font-weight: 600; margin-right: 0.25rem; }
+.truth .t-unsupported, .truth .t-fabricated_memory { color: #e08a7a; }
+.truth .t-supported { color: #8fcfae; }
+.truth .t-hedged, .truth .t-common { color: var(--muted); }
+.t-why { color: var(--muted); }

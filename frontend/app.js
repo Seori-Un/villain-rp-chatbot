@@ -529,9 +529,32 @@ function addChatReply(reply, thinking, sources, meta, isErr, scroll = true) {
   if (src) wrap.appendChild(src);
   const mem = buildMemoryChipsEl(meta && meta.memory);
   if (mem) wrap.appendChild(mem);
+  const tr = buildTruthEl(meta && meta.truth);
+  if (tr) wrap.appendChild(tr);
   log.appendChild(wrap);
   if (scroll) log.scrollTop = log.scrollHeight;
   return wrap;
+}
+
+/** Fact-check chip: "확인 3" (all grounded) or "근거 없던 말 1 → 고쳐 말함" — tap to see the claims */
+function buildTruthEl(truth) {
+  if (!truth || !Array.isArray(truth.claims) || !truth.claims.length) return null;
+  const d = document.createElement("details");
+  d.className = "truth";
+  const s = document.createElement("summary");
+  const bad = Number(truth.unsupported) || 0;
+  s.className = bad ? (truth.revised ? "truth-fixed" : "truth-warn") : "truth-ok";
+  s.textContent = bad ? `근거 없던 말 ${bad}개${truth.revised ? " → 고쳐 말함" : " (주의)"}` : `사실 확인 ${truth.claims.length}`;
+  d.appendChild(s);
+  const ul = document.createElement("ul");
+  for (const c of truth.claims) {
+    const li = document.createElement("li");
+    const tag = { supported: "근거", common: "상식", hedged: "추측", unsupported: "근거 없음", fabricated_memory: "없는 기억" }[c.status] || c.status;
+    li.innerHTML = `<b class="t-${escapeHtml(c.status)}">${escapeHtml(tag)}</b> ${escapeHtml(c.text)}${c.why ? ` <span class="t-why">— ${escapeHtml(c.why)}</span>` : ""}`;
+    ul.appendChild(li);
+  }
+  d.appendChild(ul);
+  return d;
 }
 
 /** "기억: 10/5 고양이 이름 고민" chips — tap opens that conversation in the memory panel */
@@ -720,7 +743,7 @@ async function runChatTurn(message, opts = {}) {
     clearInterval(thinkTimer);
     const thinking = Array.isArray(data.thinking) ? data.thinking.map((t) => String(t).slice(0, 400)) : [];
     const sources = Array.isArray(data.sources) ? data.sources : [];
-    const chatMeta = { model: data.model, web: Boolean(data.web), open: false, memory: data.memory ? data.memory.items : [] };
+    const chatMeta = { model: data.model, web: Boolean(data.web), open: false, memory: data.memory ? data.memory.items : [], truth: data.truth || null };
     const ui = data.ui || {};
     if (data.heard && data.heard.repaired && data.heard.text && data.heard.text !== message) {
       const bubbles = log.querySelectorAll(".bubble.user");
