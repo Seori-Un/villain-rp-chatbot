@@ -20,6 +20,52 @@
       </div>
     </header>
 
+    <div class="live-bar" role="group" aria-label="라이브 모드">
+      <button type="button" id="liveFace" class="live-btn" aria-pressed="false" hidden title="얼굴 표정 모드">얼굴</button>
+      <button type="button" id="liveVoice" class="live-btn" aria-pressed="false" hidden title="음성 대화 (ko-KR)">음성</button>
+      <button type="button" id="liveCam" class="live-btn" aria-pressed="false" hidden title="카메라로 사람 인식 (영상은 기기 밖으로 안 나감)">카메라</button>
+      <span id="liveStatus" class="live-status"></span>
+    </div>
+
+    <section id="livePanel" class="live-panel" hidden aria-label="채티 얼굴">
+      <svg id="faceSvg" class="face" viewBox="0 0 240 200" data-emotion="calm" aria-hidden="true">
+        <defs>
+          <radialGradient id="faceGrad" cx="50%" cy="40%" r="70%">
+            <stop offset="0%" stop-color="#2a2018"/>
+            <stop offset="100%" stop-color="#141416"/>
+          </radialGradient>
+        </defs>
+        <circle class="head" cx="120" cy="100" r="88" fill="url(#faceGrad)"/>
+        <g class="blush">
+          <ellipse cx="68" cy="122" rx="16" ry="8"/>
+          <ellipse cx="172" cy="122" rx="16" ry="8"/>
+        </g>
+        <g class="brows">
+          <path class="brow brow-l" d="M62 66 Q80 56 100 64"/>
+          <path class="brow brow-r" d="M140 64 Q160 56 178 66"/>
+        </g>
+        <g class="eyes">
+          <g class="eye eye-l">
+            <ellipse class="white" cx="82" cy="92" rx="18" ry="14"/>
+            <circle class="pupil" cx="82" cy="92" r="7"/>
+            <circle class="glint" cx="86" cy="88" r="2"/>
+            <rect class="lid" x="62" y="76" width="40" height="0"/>
+          </g>
+          <g class="eye eye-r">
+            <ellipse class="white" cx="158" cy="92" rx="18" ry="14"/>
+            <circle class="pupil" cx="158" cy="92" r="7"/>
+            <circle class="glint" cx="162" cy="88" r="2"/>
+            <rect class="lid" x="138" y="76" width="40" height="0"/>
+          </g>
+        </g>
+        <path class="mouth" d="M96 140 Q120 150 144 140"/>
+        <ellipse class="mouth-open" cx="120" cy="144" rx="12" ry="0"/>
+      </svg>
+      <p id="faceCaption" class="face-caption">평온</p>
+      <video id="camVideo" class="cam-video" playsinline muted></video>
+      <canvas id="camCanvas" class="cam-canvas"></canvas>
+    </section>
+
     <div id="state" class="state"></div>
     <main id="log" aria-live="polite"></main>
 
@@ -35,5 +81,6 @@
     <p class="hint">API: <code id="apiLabel"></code> · 대화는 이 기기에 저장 · <button type="button" id="clearPersist" class="linkish">기록 지우기</button></p>
   </div>
   <script src="app.js"></script>
+  <script src="live.js"></script>
 </body>
 </html>

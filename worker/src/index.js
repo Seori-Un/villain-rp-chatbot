@@ -46,7 +46,7 @@ async function handleRequest(request, env) {
       return json({
         ok: true,
         bot: "채티",
-        version: "secretary-v1.2-time-sense",
+        version: "secretary-v1.3-live",
         chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
@@ -1006,14 +1006,23 @@ class ObsessionChatbot {
     return "reply";
   }
   async turn(text, env, timeCtx) {
-    let intent = classifyIntent(text);
-    if (timeCtx) intent = maybeBoostLateIntent(intent, timeCtx.gapMs);
+    // Bot-initiated turn (camera/idle event, no user text): neutral affect,
+    // never counted as the user ignoring 채티, and does not reset the gap clock.
+    const proactive = Boolean(timeCtx && timeCtx.event && !String(text || "").trim());
+    let intent = proactive ? "chat" : classifyIntent(text);
+    if (timeCtx && !proactive) intent = maybeBoostLateIntent(intent, timeCtx.gapMs);
     this.lastIntent = intent;
-    const event = this.inferEvent(text, intent);
+    const event = proactive ? "presence" : this.inferEvent(text, intent);
     const rec = this.agent.step(text, event);
-    this.episodes.push({ t: rec.t, text: text || "(응답 없음)", event: rec.event, intent, valence: rec.rpe });
-    const out = await this.gen.reply(text, this.agent, intent, env, timeCtx);
-    this.lastMessageAt = (timeCtx && timeCtx.now) || Date.now();
+    this.episodes.push({
+      t: rec.t,
+      text: proactive ? `(이벤트: ${timeCtx.event})` : text || "(응답 없음)",
+      event: rec.event,
+      intent,
+      valence: rec.rpe,
+    });
+    const out = await this.gen.reply(proactive ? `(${timeCtx.event})` : text, this.agent, intent, env, timeCtx);
+    if (!proactive) this.lastMessageAt = (timeCtx && timeCtx.now) || Date.now();
     return out;
   }
   serialize() {

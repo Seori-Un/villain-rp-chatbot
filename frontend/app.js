@@ -29,6 +29,9 @@ let snapshot = null;
 let messages = [];
 /** @type {any[]} */
 let lastBrowseSteps = [];
+/** epoch ms when this conversation session started (for 시간 감각) */
+let sessionStartedAt = 0;
+const SESSION_STALE_MS = 6 * 60 * 60 * 1000; // new "session" after 6h away
 
 /** @type {string[]} memory-only; never localStorage */
 let browseApprovedHosts = [];
@@ -48,10 +51,13 @@ function clientTimePayload() {
     tz = Intl.DateTimeFormat().resolvedOptions().timeZone || tz;
   } catch {}
   const last = [...messages].reverse().find((m) => typeof m.ts === "number" && m.ts > 0);
+  const now = Date.now();
+  if (!sessionStartedAt || (last && now - last.ts > SESSION_STALE_MS)) sessionStartedAt = now;
   return {
-    client_now: Date.now(),
+    client_now: now,
     timezone: tz,
     last_message_at: last ? last.ts : undefined,
+    session_started_at: sessionStartedAt,
   };
 }
 
@@ -191,6 +197,7 @@ function persist() {
     mode: uiMode,
     messages: messages.slice(-60),
     last_browse_steps: summarizeSteps(lastBrowseSteps).slice(-40),
+    session_started_at: sessionStartedAt || 0,
     updated_at: Date.now(),
   };
   try {
@@ -245,6 +252,7 @@ function clearAllPersist() {
   snapshot = null;
   messages = [];
   lastBrowseSteps = [];
+  sessionStartedAt = Date.now();
   hideBrowseConfirm();
   log.innerHTML = "";
   addWelcome();
@@ -293,6 +301,7 @@ function setUiMode(mode) {
     input.placeholder = "말해 봐. /state /reset /silence · 웹은 /웹 …";
   }
   persist();
+  if (window.ChaetiLive) window.ChaetiLive.onModeChange(uiMode);
 }
 
 function addBubble(text, role, scroll = true) {
@@ -433,6 +442,7 @@ function showBrowseConfirm(data, goal) {
   snapshot = store.snapshot || null;
   uiMode = store.mode === "rp" ? "rp" : "secretary";
   lastBrowseSteps = Array.isArray(store.last_browse_steps) ? store.last_browse_steps : [];
+  sessionStartedAt = Number(store.session_started_at) || 0;
   setUiMode(uiMode);
 
   if (Array.isArray(store.messages) && store.messages.length) {
@@ -475,16 +485,27 @@ form.addEventListener("submit", async (e) => {
   await runChatTurn(message);
 });
 
-async function runChatTurn(message) {
+/**
+ * @param {string} message
+ * @param {{voice?:boolean, event?:string, presence?:object}} [opts]
+ *   event: bot-initiated turn (face_first/face_return/face_leave/idle_nudge) — no user bubble.
+ * @returns {Promise<string|null>} reply text (null on failure)
+ */
+async function runChatTurn(message, opts = {}) {
+  const isEvent = Boolean(opts.event);
   // Capture gap vs previous message BEFORE pushing this turn's user bubble.
   const timePayload = clientTimePayload();
-  addBubble(message === "/silence" ? "(침묵)" : message, "user");
-  if (!message.startsWith("/")) {
-    messages.push({ role: "user", content: message, kind: "chat", ts: Date.now() });
+  const live = window.ChaetiLive ? window.ChaetiLive.payload() : {};
+  if (!isEvent) {
+    addBubble(message === "/silence" ? "(침묵)" : message, "user");
+    if (!message.startsWith("/")) {
+      messages.push({ role: "user", content: message, kind: "chat", ts: Date.now() });
+    }
   }
   const btn = form.querySelector("button");
   btn.disabled = true;
   const pending = addBubble("…", "bot");
+  let replyOut = null;
   try {
     const { res, data } = await fetchJson(
       `${API_BASE}/chat`,
@@ -504,6 +525,9 @@ async function runChatTurn(message) {
           session_id: sessionId || undefined,
           snapshot: snapshot || undefined,
           ...timePayload,
+          ...live,
+          voice: Boolean(opts.voice || live.voice),
+          event: opts.event || undefined,
           client_now: Date.now(),
         }),
       },
@@ -514,14 +538,16 @@ async function runChatTurn(message) {
     const reply = data.reply || data.error || "응답이 비었네.";
     pending.textContent = reply;
     if (!res.ok) pending.classList.add("err");
+    else replyOut = reply;
     showState(data.state);
+    if (window.ChaetiLive) window.ChaetiLive.onReply(reply, data.state || null, res.ok);
     if (message.trim() === "/reset") {
       messages = [];
       snapshot = data.snapshot || null;
       log.innerHTML = "";
       addBubble(reply, "bot");
       messages.push({ role: "assistant", content: reply, kind: "chat", ts: Date.now() });
-    } else if (!message.startsWith("/")) {
+    } else if (isEvent || !message.startsWith("/")) {
       messages.push({ role: "assistant", content: reply, kind: "chat", ts: Date.now() });
     }
     persist();
@@ -535,9 +561,21 @@ async function runChatTurn(message) {
     pending.classList.add("err");
   } finally {
     btn.disabled = false;
-    input.focus();
+    if (!isEvent && !opts.voice) input.focus();
   }
+  return replyOut;
 }
+
+/* ---------- public hooks for live.js (face / voice / camera) ---------- */
+window.Chaeti = {
+  runChatTurn,
+  getMode: () => uiMode,
+  setMode: setUiMode,
+  lastUserMessageAt: () => {
+    const m = [...messages].reverse().find((x) => x.role === "user" && typeof x.ts === "number");
+    return m ? m.ts : 0;
+  },
+};
 
 async function runBrowseTurn(goal, opts = {}) {
   const fromConfirm = Boolean(opts.fromConfirm);

@@ -257,3 +257,134 @@ code { color: #cfc8c0; }
 }
 .browse-steps .step-think .step-label { color: #d4b896; }
 .browse-steps .step-observe .step-label { color: #7eb89a; }
+
+/* ---------- live layer: face / voice / camera (RP mode) ---------- */
+.live-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin: 0.6rem 0 0;
+  min-height: 1.6rem;
+}
+.live-btn {
+  background: #121214;
+  border: 1px solid #2a2a2e;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.3rem 0.8rem;
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.live-btn[hidden] { display: none !important; }
+.live-btn[aria-pressed="true"] {
+  color: var(--ink);
+  border-color: var(--accent);
+  background: #2a1a12;
+}
+.live-status {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-left: 0.35rem;
+}
+.live-status.listening { color: var(--ok); }
+.live-status.speaking { color: var(--accent); }
+.live-status.busy { color: var(--warn); }
+.live-status.present { color: var(--ok); }
+.live-status.absent { color: var(--muted); }
+.live-status.err { color: var(--err); }
+
+.live-panel {
+  position: relative;
+  margin: 0.6rem 0 0;
+  display: grid;
+  place-items: center;
+  padding: 0.5rem;
+  background: var(--panel);
+  border: 1px solid #2a2a2e;
+  border-radius: 1rem;
+}
+.live-panel[hidden] { display: none !important; }
+.live-panel:not(.face-on) .face,
+.live-panel:not(.face-on) .face-caption { display: none; }
+.live-panel:not(.face-on) { padding: 0.25rem; min-height: 0; border: none; background: transparent; }
+.live-panel.user-present { border-color: #2f5f4a; }
+
+.face {
+  width: min(52vw, 260px);
+  height: auto;
+  --pupil: 1;
+  --brow: 0;
+  --blush: 0;
+  --gx: 0;
+  --gy: 0;
+}
+.face .head { stroke: #3a2a20; stroke-width: 2; }
+.face .white { fill: #f1ece4; }
+.face .pupil {
+  fill: #1a110c;
+  transform: translate(calc(var(--gx) * 1px), calc(var(--gy) * 1px)) scale(var(--pupil));
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 0.6s ease;
+}
+.face .glint { fill: #fff; opacity: 0.9; }
+.face .lid {
+  fill: #141416;
+  transition: height 0.08s linear;
+}
+.face.blink .lid { height: 32px; }
+.face .brow {
+  fill: none;
+  stroke: #3a2a20;
+  stroke-width: 5;
+  stroke-linecap: round;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 0.5s ease;
+}
+/* stress knits the brows inward/down */
+.face .brow-l { transform: rotate(calc(var(--brow) * 18deg)) translateY(calc(var(--brow) * 4px)); }
+.face .brow-r { transform: rotate(calc(var(--brow) * -18deg)) translateY(calc(var(--brow) * 4px)); }
+.face .blush ellipse { fill: var(--accent); opacity: calc(var(--blush) * 0.45); transition: opacity 0.8s; }
+.face .mouth {
+  fill: none;
+  stroke: #e0b8a0;
+  stroke-width: 4;
+  stroke-linecap: round;
+}
+.face .mouth-open { fill: #2a0f0a; transition: ry 0.12s; }
+.face.talking .mouth { opacity: 0; }
+.face.talking .mouth-open { animation: talk 0.26s ease-in-out infinite alternate; }
+@keyframes talk {
+  from { ry: 2px; }
+  to { ry: 9px; }
+}
+
+/* per-emotion tweaks (emotionLabel() → data-emotion) */
+.face[data-emotion="joy"] .blush ellipse { opacity: 0.5; }
+.face[data-emotion="bonded"] .white { ry: 11px; }
+.face[data-emotion="bonded"] .blush ellipse { opacity: 0.6; }
+.face[data-emotion="ruminate"] .pupil { transform: translate(5px, 4px) scale(var(--pupil)); }
+.face[data-emotion="yearning"] .pupil { transform: translate(calc(var(--gx) * 1px), calc(var(--gy) * 1px)) scale(calc(var(--pupil) * 1.2)); }
+.face[data-emotion="anxious"] .white { ry: 16px; }
+.face[data-emotion="anxious"] .head { animation: tremble 0.9s ease-in-out infinite; }
+@keyframes tremble {
+  0%, 100% { transform: translate(0, 0); }
+  30% { transform: translate(1px, -0.5px); }
+  60% { transform: translate(-1px, 0.5px); }
+}
+
+.face-caption { margin: 0.2rem 0 0; font-size: 0.78rem; color: var(--muted); }
+
+/* camera: processed on-device only; keep elements out of layout */
+.cam-video, .cam-canvas {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0.01;
+  pointer-events: none;
+  bottom: 0;
+  right: 0;
+}
