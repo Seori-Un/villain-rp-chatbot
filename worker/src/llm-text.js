@@ -1,6 +1,6 @@
 /**
  * Generic one-shot text completion: Claude → Gemini → Groq.
- * Used by think.js (plan stage). Keeps RP generator in index.js untouched.
+ * Used by think.js (plan stage) and memory digests. The reply generator in index.js is separate.
  * @returns {Promise<{text:string, provider:string, model:string}>}
  */
 

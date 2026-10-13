@@ -1,5 +1,5 @@
 /**
- * 채티 live layer — RP 모드 전용.
+ * 채티 live layer — 얼굴·목소리·눈.
  *  ① 얼굴 표정 모드   : /chat state.emotion + 집착/불안 수치 → SVG 표정, 말할 때 입 움직임
  *  ② 음성 대화        : SpeechRecognition(ko-KR) 듣기 → /chat → speechSynthesis 말하기 → 다시 듣기
  *  ③ 카메라 사람 인식 : getUserMedia + FaceDetector(없으면 픽셀 휴리스틱). 영상은 기기 밖으로 절대 안 나감.
@@ -98,6 +98,21 @@
     faceSvg.style.setProperty("--brow", String(stress)); // brow knit
     faceSvg.style.setProperty("--blush", String(attachment * 0.9));
     if (caption) caption.textContent = emo;
+  }
+
+  /** Longer-lived feelings (from the server) tint the face under the per-turn expression. */
+  function applyFeelings(f) {
+    if (!f) return;
+    const n = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, Number(v) || 0));
+    faceSvg.style.setProperty("--mood", String(n(f.mood, -1, 1)));
+    faceSvg.style.setProperty("--hurt", String(n(f.hurt)));
+    faceSvg.style.setProperty("--jealousy", String(n(f.jealousy)));
+    faceSvg.style.setProperty("--longing", String(n(f.longing)));
+    faceSvg.style.setProperty("--energy", String(n(f.energy)));
+    faceSvg.classList.toggle("sulking", f.hurt > 0.5 || f.mood < -0.45);
+    faceSvg.classList.toggle("glowing", f.mood > 0.5);
+    faceSvg.classList.toggle("tired", f.energy < 0.3);
+    if (caption && f.label) caption.textContent = f.label;
   }
 
   function startTalking() {
@@ -519,7 +534,8 @@
   function onAbsent(now) {
     cam.present = false;
     cam.awayAt = cam.lastSeen || now;
-    fireEvent("face_leave", {});
+    // sulking → lets you go without a word; lonely/attached → almost always says something
+    if (Math.random() < LEAVE_CHANCE) fireEvent("face_leave", {});
   }
 
   async function setCam(on) {
@@ -555,8 +571,16 @@
    * ===================================================================== */
   let lastProactiveAt = 0;
   const PROACTIVE_MIN_GAP_MS = 60 * 1000;
-  const IDLE_NUDGE_AFTER_MS = 12 * 60 * 1000;
-  const IDLE_NUDGE_MIN_GAP_MS = 30 * 60 * 1000;
+  // how soon 채티 speaks first depends on how she feels right now (server sends `proactive` with every reply)
+  let IDLE_NUDGE_AFTER_MS = 12 * 60 * 1000;
+  let IDLE_NUDGE_MIN_GAP_MS = 30 * 60 * 1000;
+  let LEAVE_CHANCE = 0.6;
+  function applyProactive(p) {
+    if (!p || typeof p !== "object") return;
+    if (p.idle_nudge_min) IDLE_NUDGE_AFTER_MS = Math.max(2, Number(p.idle_nudge_min)) * 60 * 1000;
+    if (p.idle_repeat_min) IDLE_NUDGE_MIN_GAP_MS = Math.max(5, Number(p.idle_repeat_min)) * 60 * 1000;
+    if (p.leave_chance != null) LEAVE_CHANCE = Math.max(0, Math.min(1, Number(p.leave_chance)));
+  }
   let lastIdleNudgeAt = 0;
   let eventQueue = Promise.resolve();
 
@@ -606,11 +630,13 @@
       };
     },
     /** called after every /chat reply (typed or spoken) */
-    onReply(reply, state, ok) {
+    onReply(reply, state, ok, extras) {
       if (state) {
         st.state = state;
         if (st.face) applyExpression(state);
       }
+      if (extras && extras.feelings) applyFeelings(extras.feelings);
+      if (extras && extras.proactive) applyProactive(extras.proactive);
       // typed message while voice mode is on → still read it aloud
       if (ok && st.voice && !st.busy && reply) {
         st.busy = true;

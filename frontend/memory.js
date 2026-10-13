@@ -94,7 +94,7 @@
           <button type="button" class="mem-conv-open">
             <span class="mem-time">${esc(c.time)}</span>
             <span class="mem-title">${esc(c.title)}</span>
-            <span class="mem-mode">${c.mode === "secretary" ? "비서" : "RP"} · ${c.message_count}</span>
+            <span class="mem-mode">${c.message_count}개</span>
           </button>
           ${c.summary ? `<p class="mem-summary">${esc(c.summary.split("\\n")[0]).slice(0, 200)}</p>` : ""}
           <div class="mem-actions">
@@ -158,7 +158,7 @@
       <div class="mem-detail-head">
         <button type="button" class="linkish mem-back">← 목록</button>
         <h3>${esc(c.title)}</h3>
-        <small>${esc(fmtTs(c.started_at))} · ${c.mode === "secretary" ? "비서" : "RP"} · ${c.message_count}개${c.topics.length ? " · " + c.topics.map((t) => "#" + esc(t.name)).join(" ") : ""}</small>
+        <small>${esc(fmtTs(c.started_at))} · ${c.message_count}개${c.topics.length ? " · " + c.topics.map((t) => "#" + esc(t.name)).join(" ") : ""}</small>
         ${c.summary ? `<p class="mem-summary">${esc(c.summary)}</p>` : ""}
         <div class="mem-actions">
           <button type="button" class="live-btn mem-continue">이어서 대화</button>

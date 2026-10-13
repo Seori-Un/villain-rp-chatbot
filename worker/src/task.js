@@ -19,7 +19,7 @@ export function looksLikeBrowseTask(text) {
   const raw = String(text || "").trim();
   if (!raw) return false;
   if (/^\s*\/(?:웹|web|browse)(?=\s|$)/i.test(raw)) return true;
-  // Slash RP commands stay on /chat
+  // Slash commands stay on /chat
   if (/^\s*\//.test(raw)) return false;
 
   const t = raw.normalize("NFC");

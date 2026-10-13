@@ -258,7 +258,7 @@ code { color: #5c4766; }
 .browse-steps .step-think .step-label { color: #9a6a8c; }
 .browse-steps .step-observe .step-label { color: #3a8f6a; }
 
-/* ---------- live layer: face / voice / camera (RP mode) ---------- */
+/* ---------- live layer: face / voice / camera ---------- */
 .live-bar {
   display: flex;
   align-items: center;
@@ -589,3 +589,14 @@ button[type="submit"] { border-radius: 999px; background: linear-gradient(135deg
 /* anxious → teary wobble */
 .face[data-emotion="anxious"] .white { ry: 26px; fill: #f2f6ff; }
 .face[data-emotion="anxious"] .glint2 { r: 4px; }
+/* ---------- feelings tint on the face (long-lived, from server) ---------- */
+.face { --mood: 0; --hurt: 0; --jealousy: 0; --longing: 0; --energy: 0.6; }
+.face .head { filter: saturate(calc(0.75 + var(--energy) * 0.5)) brightness(calc(0.9 + var(--mood) * 0.12)); transition: filter 1.2s ease; }
+.face.sulking .brows { transform: translateY(5px); }
+.face.sulking .brow-l { transform: rotate(-10deg) translateY(4px); }
+.face.sulking .brow-r { transform: rotate(10deg) translateY(4px); }
+.face.sulking .white { ry: 11px; }
+.face.glowing .blush ellipse { opacity: 0.6 !important; }
+.face.glowing .glint { r: 3px; }
+.face.tired .lid { height: 10px; }
+.face.tired .mouth { stroke-width: 3; }

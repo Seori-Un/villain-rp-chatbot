@@ -1,7 +1,7 @@
 /**
  * Browser agent loop — Claude (if key) → Gemini → Groq.
  * Emits structured steps: {type: think|tool|observe, content, ...}
- * Keeps /chat Groq RP untouched.
+ * /chat is separate and untouched.
  */
 
 import { browserSystemPrompt, TOOL_NAMES } from "./tools.js";
@@ -199,7 +199,7 @@ export async function runBrowserAgent({ goal, env, session_id, max_steps = 8, co
         // re-parse aggressively; if still fail, nudge instead of treating as done
         pushStep(steps, {
           type: "think",
-          content: "모델이 JSON을 냈지만 파싱에 실패했어. 다시 요청할게.",
+          content: "계획이 JSON으로 왔는데 읽을 수 없었어. 다시 요청할게.",
         });
         messages.push({
           role: "user",

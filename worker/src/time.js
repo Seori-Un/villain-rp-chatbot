@@ -1,5 +1,5 @@
 /**
- * Time awareness helpers for 채티 RP prompts.
+ * Time awareness helpers for 채티 prompts.
  * Prefer client timezone + client_now; fall back to Asia/Seoul / server clock.
  */
 

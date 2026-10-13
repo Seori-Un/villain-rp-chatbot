@@ -310,6 +310,7 @@ function redactBrowseGoal(goal) {
 
 function showState(s) {
   if (!s) return;
+  if (!params.has("debug")) return; // ?debug=1 shows raw numbers
   stateEl.textContent = `집착 ${s.obsession} · 애착 ${s.attachment} · 불안 ${s.stress} · 반추 ${s.rumination} · ${s.emotion}`;
 }
 
@@ -425,7 +426,7 @@ function buildTimelineEl(steps, meta) {
   const thinks = (steps || []).filter((s) => (s.type || inferType(s)) === "think").length;
   const tools = (steps || []).filter((s) => (s.type || inferType(s)) === "tool").length;
   const llmBit = meta?.llm ? ` · ${meta.llm}` : "";
-  const modelBit = meta?.model ? `/${meta.model}` : "";
+  const modelBit = "";
   const summary = document.createElement("summary");
   summary.innerHTML =
     `생각 중 <span class="think-meta">${thinks}생각 · ${tools}도구${escapeHtml(llmBit)}${escapeHtml(modelBit)}</span>`;
@@ -498,7 +499,7 @@ function buildChatThinkingEl(thinking, meta) {
   const summary = document.createElement("summary");
   const bits = [`${thinking.length}단계`];
   if (meta?.web) bits.push("웹 검색");
-  if (meta?.model) bits.push(meta.model);
+
   summary.innerHTML = `생각 <span class="think-meta">${escapeHtml(bits.join(" · "))}</span>`;
   details.appendChild(summary);
   const ol = document.createElement("ol");
@@ -506,9 +507,9 @@ function buildChatThinkingEl(thinking, meta) {
   for (const t of thinking) {
     const li = document.createElement("li");
     const isWeb = /^웹 검색/.test(t);
-    const isModel = /^\(모델 내부 생각\)/.test(t);
+    const isInner = /^\(속마음\)/.test(t);
     li.className = isWeb ? "step-tool step-ok" : "step-think";
-    li.innerHTML = `<span class="step-label">${isWeb ? "검색" : isModel ? "모델" : "생각"}</span>${escapeHtml(t.replace(/^\(모델 내부 생각\)\s*/, ""))}`;
+    li.innerHTML = `<span class="step-label">${isWeb ? "검색" : isInner ? "속마음" : "생각"}</span>${escapeHtml(t.replace(/^\(속마음\)\s*/, ""))}`;
     ol.appendChild(li);
   }
   details.appendChild(ol);
@@ -727,7 +728,7 @@ async function runChatTurn(message, opts = {}) {
     const replyEl = addChatReply(reply, thinking, sources, chatMeta, !res.ok);
     if (res.ok) replyOut = reply;
     showState(data.state);
-    if (window.ChaetiLive) window.ChaetiLive.onReply(reply, data.state || null, res.ok);
+    if (window.ChaetiLive) window.ChaetiLive.onReply(reply, data.state || null, res.ok, { feelings: data.feelings, proactive: data.proactive });
     if (message.trim() === "/reset") {
       messages = [];
       snapshot = data.snapshot || null;
@@ -915,7 +916,7 @@ async function runBrowseTurn(goal, opts = {}) {
       data.reply ||
       data.error ||
       (res.ok ? "끝났어." : "실패했어.");
-    const footer = `\n(${ms}ms · ${data.llm || "?"}${data.model ? " / " + data.model : ""})`;
+    const footer = `\n(${Math.round(ms / 1000)}초)`;
 
     pendingWrap.remove();
     let isErr = false;

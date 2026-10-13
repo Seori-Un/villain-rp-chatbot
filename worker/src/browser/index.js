@@ -1,5 +1,5 @@
 /**
- * POST /browse handler — optional sibling to RP /chat.
+ * POST /browse handler — sibling to /chat.
  * Browse LLM: Claude (if ANTHROPIC_API_KEY) → Gemini → Groq.
  * /chat is separate (Claude→Gemini→Groq) and untouched by browse failures.
  */
