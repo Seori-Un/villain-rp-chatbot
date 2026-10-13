@@ -17,7 +17,8 @@ const PLAN_SYSTEM = `너는 한국어 챗봇 '채티'의 내부 계획기다. �
  "thoughts": ["..."],           // 2~4개. 사용자가 진짜 원하는 것, 놓치면 안 될 맥락, 답의 방향. 각 1문장, 한국어. 화면에 그대로 보임.
  "needs_web": false,            // 최신 정보·실시간 데이터·특정 사실 확인(뉴스, 가격, 일정, 버전, 날씨, 인물 현재 직책, 최근 출시 등)이 답의 정확성에 필요하면 true
  "queries": ["..."],            // needs_web일 때만, 1~3개, 검색엔진용 짧은 검색어 (한국어/영어 혼용 가능)
- "answer_hint": "..."           // 답변 톤/길이/꼭 넣을 것 1문장
+ "answer_hint": "...",          // 답변 톤/길이/꼭 넣을 것 1문장
+ "memory_query": ""             // 유저가 예전 대화·과거 일·"기억나?" 같은 걸 언급하면, 기억 검색용 핵심어 2~5개 (아니면 빈 문자열)
 }
 needs_web 기준: 일상 대화·감정·롤플레이·상식은 false. "요즘/최근/지금/오늘/올해/가격/몇 시/누가 ~인지/출시/버전" 같은 현재성 질문은 true.
 mode=rp 이면 채티는 집착형 롤플레이 캐릭터다. thoughts는 캐릭터의 속마음 톤(짧게, 집착 섞어도 됨)으로 쓰되 과하게 길지 않게.
@@ -31,7 +32,7 @@ mode=secretary 이면 비서 톤으로 실용적으로.`;
 export async function planTurn(env, { userText, history = [], mode = "rp", timeHint = "" }) {
   const t0 = Date.now();
   const text = String(userText || "").trim();
-  const empty = { thoughts: [], needs_web: false, queries: [], answer_hint: "", provider: "none", model: "", ms: 0 };
+  const empty = { thoughts: [], needs_web: false, queries: [], answer_hint: "", memory_query: "", provider: "none", model: "", ms: 0 };
   if (!text || text.startsWith("/")) return empty;
 
   const recent = history
@@ -60,6 +61,7 @@ export async function planTurn(env, { userText, history = [], mode = "rp", timeH
       needs_web,
       queries,
       answer_hint: String(obj.answer_hint || "").slice(0, 200),
+      memory_query: String(obj.memory_query || "").slice(0, 120),
       provider: out.provider,
       model: out.model,
       ms: Date.now() - t0,

@@ -10,5 +10,19 @@ compatibility_date = "2026-09-01"
 #   BROWSER_API_KEY   shared with browser-runner
 # Chat works without these.
 
+# 장기 기억 (D1). 한 번만:
+#   npx wrangler d1 create chaeti-memory      → database_id 를 아래에 넣기
+#   npx wrangler d1 migrations apply chaeti-memory --remote
+# 바인딩이 없으면 기억 기능만 꺼지고 나머지는 그대로 동작.
+[[d1_databases]]
+binding = "DB"
+database_name = "chaeti-memory"
+database_id = "95f48f4a-d3d3-456e-8b8e-cbc71a2f4e23"
+migrations_dir = "migrations"
+
+# 매일 새벽(KST 04:00) 하루 요약·주제 정리 (프론트에서도 접속 시 돌림)
+[triggers]
+crons = ["0 19 * * *"]
+
 [limits]
 cpu_ms = 300000

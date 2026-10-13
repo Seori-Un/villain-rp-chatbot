@@ -33,6 +33,32 @@ let lastBrowseSteps = [];
 let sessionStartedAt = 0;
 const SESSION_STALE_MS = 6 * 60 * 60 * 1000; // new "session" after 6h away
 
+/* ---------- long-term memory identity (server, D1) ---------- */
+const USER_KEY = "chaeti_user_id";
+/** 기억 코드: links the same memory across devices. Letters/digits/-/_ (6~64). */
+function genUserId() {
+  const a = crypto.getRandomValues(new Uint8Array(8));
+  return "u-" + Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+let userId = (localStorage.getItem(USER_KEY) || "").toLowerCase();
+if (!/^[a-z0-9_-]{6,64}$/.test(userId)) {
+  userId = genUserId();
+  localStorage.setItem(USER_KEY, userId);
+}
+/** current conversation id on the server (new one after a long gap or 「새 대화」) */
+let convId = "";
+function genConvId() {
+  return "c-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
+}
+function ensureConvId(forceNew = false) {
+  const last = [...messages].reverse().find((m) => typeof m.ts === "number" && m.ts > 0);
+  if (forceNew || !convId || (last && Date.now() - last.ts > SESSION_STALE_MS)) convId = genConvId();
+  return convId;
+}
+function memoryIds() {
+  return { user_id: userId, conv_id: ensureConvId() };
+}
+
 /** @type {string[]} memory-only; never localStorage */
 let browseApprovedHosts = [];
 /** @type {null | { goal: string, session_id?: string, needs_confirm: object }} */
@@ -200,6 +226,7 @@ function persist() {
     messages: messages.slice(-60),
     last_browse_steps: summarizeSteps(lastBrowseSteps).slice(-40),
     session_started_at: sessionStartedAt || 0,
+    conv_id: convId || "",
     updated_at: Date.now(),
   };
   try {
@@ -255,6 +282,7 @@ function clearAllPersist() {
   messages = [];
   lastBrowseSteps = [];
   sessionStartedAt = Date.now();
+  convId = genConvId();
   hideBrowseConfirm();
   log.innerHTML = "";
   addWelcome();
@@ -461,8 +489,38 @@ function addChatReply(reply, thinking, sources, meta, isErr, scroll = true) {
   wrap.appendChild(text);
   const src = buildSourcesEl(sources);
   if (src) wrap.appendChild(src);
+  const mem = buildMemoryChipsEl(meta && meta.memory);
+  if (mem) wrap.appendChild(mem);
   log.appendChild(wrap);
   if (scroll) log.scrollTop = log.scrollHeight;
+  return wrap;
+}
+
+/** "기억: 10/5 고양이 이름 고민" chips — tap opens that conversation in the memory panel */
+function buildMemoryChipsEl(items) {
+  if (!Array.isArray(items) || !items.length) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "sources memory-refs";
+  const label = document.createElement("span");
+  label.className = "sources-label";
+  label.textContent = "기억";
+  wrap.appendChild(label);
+  const seen = new Set();
+  for (const it of items) {
+    const key = it.type === "topic" ? "t:" + it.topic_id : "c:" + it.conv_id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "source-chip memory-chip";
+    b.textContent = it.type === "topic" ? `# ${it.name}` : `${it.day ? it.day.slice(5).replace("-", "/") + " " : ""}${it.title || ""}`.trim();
+    b.addEventListener("click", () => {
+      if (!window.ChaetiMemory) return;
+      if (it.type === "topic") window.ChaetiMemory.openTopic(it.topic_id);
+      else window.ChaetiMemory.openConversation(it.conv_id);
+    });
+    wrap.appendChild(b);
+  }
   return wrap;
 }
 
@@ -515,6 +573,7 @@ function showBrowseConfirm(data, goal) {
   uiMode = store.mode === "rp" ? "rp" : "secretary";
   lastBrowseSteps = Array.isArray(store.last_browse_steps) ? store.last_browse_steps : [];
   sessionStartedAt = Number(store.session_started_at) || 0;
+  convId = typeof store.conv_id === "string" ? store.conv_id : "";
   setUiMode(uiMode);
 
   if (Array.isArray(store.messages) && store.messages.length) {
@@ -605,6 +664,7 @@ async function runChatTurn(message, opts = {}) {
           session_id: sessionId || undefined,
           snapshot: snapshot || undefined,
           ui_mode: uiMode,
+          ...memoryIds(),
           ...timePayload,
           ...live,
           voice: Boolean(opts.voice || live.voice),
@@ -620,7 +680,7 @@ async function runChatTurn(message, opts = {}) {
     clearInterval(thinkTimer);
     const thinking = Array.isArray(data.thinking) ? data.thinking.map((t) => String(t).slice(0, 400)) : [];
     const sources = Array.isArray(data.sources) ? data.sources : [];
-    const chatMeta = { model: data.model, web: Boolean(data.web), open: false };
+    const chatMeta = { model: data.model, web: Boolean(data.web), open: false, memory: data.memory ? data.memory.items : [] };
     pending.remove();
     const replyEl = addChatReply(reply, thinking, sources, chatMeta, !res.ok);
     if (res.ok) replyOut = reply;
@@ -657,6 +717,51 @@ window.Chaeti = {
   runChatTurn,
   getMode: () => uiMode,
   setMode: setUiMode,
+  apiBase: API_BASE,
+  getUserId: () => userId,
+  setUserId: (id) => {
+    const v = String(id || "").trim().toLowerCase();
+    if (!/^[a-z0-9_-]{6,64}$/.test(v)) return false;
+    userId = v;
+    localStorage.setItem(USER_KEY, userId);
+    return true;
+  },
+  getConvId: () => convId,
+  /** start a fresh conversation (local log cleared, memory kept on server) */
+  newConversation: () => {
+    messages = [];
+    convId = genConvId();
+    sessionStartedAt = Date.now();
+    log.innerHTML = "";
+    addWelcome();
+    persist();
+  },
+  /** load a past conversation from the server and continue it in place */
+  continueConversation: (conv) => {
+    if (!conv || !Array.isArray(conv.messages)) return;
+    convId = conv.id;
+    messages = conv.messages
+      .filter((m) => m.content)
+      .map((m) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: m.content,
+        kind: m.kind === "browse" ? "browse" : "chat",
+        ts: m.ts,
+        sources: m.meta && m.meta.sources ? m.meta.sources : undefined,
+      }))
+      .slice(-60);
+    if (conv.mode === "secretary" || conv.mode === "rp") uiMode = conv.mode;
+    setUiMode(uiMode);
+    log.innerHTML = "";
+    for (const m of messages) {
+      if (m.role === "user") addBubble(m.content, "user", false);
+      else if (m.kind === "browse") addBrowseReply(m.content, [], {}, false, m.sources || []);
+      else addBubble(m.content, "bot", false);
+    }
+    addBubble("(여기서부터 이어서 얘기해 — 서버에 저장된 대화야)", "bot", false);
+    log.scrollTop = log.scrollHeight;
+    persist();
+  },
   lastUserMessageAt: () => {
     const m = [...messages].reverse().find((x) => x.role === "user" && typeof x.ts === "number");
     return m ? m.ts : 0;
@@ -717,6 +822,8 @@ async function runBrowseTurn(goal, opts = {}) {
 
   const browseBody = {
     goal,
+    ...memoryIds(),
+    timezone: clientTimePayload().timezone,
     session_id: browseSessionId || sessionId || undefined,
     max_steps: BROWSE_MAX_STEPS,
     confirm: confirmPayload,

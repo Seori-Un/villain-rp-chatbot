@@ -17,6 +17,22 @@ import {
   maybeBoostLateIntent,
 } from "./time.js";
 import { planTurn, runPlanResearch, formatPlanBlock, summarizeRawThinking } from "./think.js";
+import {
+  memoryEnabled,
+  cleanUserId,
+  cleanId,
+  appendMessages,
+  recall,
+  digest,
+  digestAll,
+  listTimeline,
+  getConversation,
+  listTopics,
+  getTopic,
+  searchMessages,
+  deleteMemory,
+  memoryStats,
+} from "./memory.js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -29,17 +45,28 @@ const SESSIONS = new Map();
 const MAX_SESSIONS = 300;
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     try {
-      return await handleRequest(request, env);
+      return await handleRequest(request, env, ctx);
     } catch (e) {
       const msg = String(e && e.message ? e.message : e).slice(0, 240);
       return json({ ok: false, error: "uncaught", reply: "서버 오류: " + msg }, 500);
     }
   },
+  /** Cron (wrangler.toml [triggers]): nightly memory digest for active users. */
+  async scheduled(_event, env, ctx) {
+    ctx.waitUntil(digestAll(env));
+  },
 };
 
-async function handleRequest(request, env) {
+/** fire-and-forget helper (works without ctx too) */
+function bg(ctx, promise) {
+  const p = Promise.resolve(promise).catch((e) => console.warn("bg task failed", e && e.message));
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p);
+  return p;
+}
+
+async function handleRequest(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS });
@@ -48,7 +75,7 @@ async function handleRequest(request, env) {
       return json({
         ok: true,
         bot: "채티",
-        version: "secretary-v1.4-think-web",
+        version: "secretary-v1.5-memory",
         chat_llm: resolveChatLlm(env),
         groq: Boolean(env.GROQ_API_KEY),
         gemini: Boolean(env.GEMINI_API_KEY),
@@ -58,12 +85,13 @@ async function handleRequest(request, env) {
         ),
         sessions: SESSIONS.size,
         agent: true,
+        memory: memoryEnabled(env),
         ...browserHealth(env),
       });
     }
     if (url.pathname === "/agent" && request.method === "POST") {
       try {
-        return await handleAgent(request, env);
+        return await handleAgent(request, env, ctx);
       } catch (e) {
         const msg = String(e && e.message ? e.message : e).slice(0, 240);
         return json(
@@ -77,9 +105,14 @@ async function handleRequest(request, env) {
         );
       }
     }
+    if (url.pathname.startsWith("/memory/")) {
+      return handleMemory(request, env, ctx, url);
+    }
     if (url.pathname === "/browse" && request.method === "POST") {
       try {
+        const peek = await request.clone().json().catch(() => ({}));
         const out = await handleBrowse(request, env);
+        persistBrowseTurn(env, ctx, peek, out.body);
         return json(out.body, out.status);
       } catch (e) {
         const msg = String(e && e.message ? e.message : e).slice(0, 240);
@@ -95,7 +128,7 @@ async function handleRequest(request, env) {
       }
     }
     if (url.pathname === "/chat" && request.method === "POST") {
-      return handleChat(request, env);
+      return handleChat(request, env, ctx);
     }
     if (url.pathname === "/state" && request.method === "POST") {
       return handleState(request);
@@ -124,7 +157,7 @@ function resolveChatLlm(env) {
  * Unified secretary entry: route task-like messages to browse, else RP chat.
  * Frontend may also route client-side; this endpoint is for one-box UX.
  */
-async function handleAgent(request, env) {
+async function handleAgent(request, env, ctx) {
   let body;
   try {
     body = await request.json();
@@ -148,6 +181,7 @@ async function handleAgent(request, env) {
       }),
     });
     const out = await handleBrowse(browseReq, env);
+    persistBrowseTurn(env, ctx, body, out.body);
     return json(
       {
         ...out.body,
@@ -164,7 +198,7 @@ async function handleAgent(request, env) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const chatRes = await handleChat(chatReq, env);
+  const chatRes = await handleChat(chatReq, env, ctx);
   // annotate routed
   try {
     const data = await chatRes.json();
@@ -174,7 +208,86 @@ async function handleAgent(request, env) {
   }
 }
 
-async function handleChat(request, env) {
+/** Persist a /browse turn (goal + final reply) when the client identifies itself. */
+function persistBrowseTurn(env, ctx, body, result) {
+  const user_id = cleanUserId(body?.user_id);
+  const conv_id = cleanId(body?.conv_id);
+  if (!memoryEnabled(env) || !user_id || !conv_id || !result) return;
+  const goal = String(body.goal || body.message || body.text || "").trim();
+  const reply = String(result.reply || "").trim();
+  if (!goal || !reply) return;
+  const now = Date.now();
+  bg(
+    ctx,
+    appendMessages(env, {
+      user_id,
+      conv_id,
+      mode: "secretary",
+      tz: body.timezone || "Asia/Seoul",
+      messages: [
+        { role: "user", content: goal, kind: "browse", ts: now - 1 },
+        { role: "assistant", content: reply, kind: "browse", ts: now, meta: { sources: (result.sources || []).slice(0, 8) } },
+      ],
+    })
+  );
+}
+
+/** /memory/* — timeline, conversations, topics, search, delete, digest, stats */
+async function handleMemory(request, env, ctx, url) {
+  if (!memoryEnabled(env)) {
+    return json({ ok: false, error: "memory_disabled", reply: "서버에 기억 저장소(D1)가 아직 연결되지 않았어. worker/wrangler.toml의 [[d1_databases]] 참고." }, 503);
+  }
+  let body = {};
+  if (request.method === "POST") {
+    try {
+      body = await request.json();
+    } catch {
+      return json({ ok: false, error: "invalid_json" }, 400);
+    }
+  }
+  const q = (k) => url.searchParams.get(k) ?? body[k];
+  const user_id = cleanUserId(q("user_id"));
+  if (!user_id) return json({ ok: false, error: "bad_user_id", hint: "user_id: 6~64자 [a-z0-9_-]" }, 400);
+  const path = url.pathname.replace(/^\/memory\//, "");
+  try {
+    switch (path) {
+      case "stats":
+        return json({ ok: true, ...(await memoryStats(env, user_id)) });
+      case "timeline":
+        return json({ ok: true, ...(await listTimeline(env, user_id, { days: q("days") || 14, before: q("before") || "" })) });
+      case "conversation": {
+        const conv = await getConversation(env, user_id, cleanId(q("conv_id")), { limit: q("limit") || 300 });
+        return conv ? json({ ok: true, conversation: conv }) : json({ ok: false, error: "not_found" }, 404);
+      }
+      case "topics":
+        return json({ ok: true, ...(await listTopics(env, user_id)) });
+      case "topic": {
+        const t = await getTopic(env, user_id, cleanId(q("topic_id")));
+        return t ? json({ ok: true, topic: t }) : json({ ok: false, error: "not_found" }, 404);
+      }
+      case "search":
+        return json({ ok: true, ...(await searchMessages(env, user_id, String(q("q") || ""), { limit: q("limit") || 12 })) });
+      case "append": {
+        if (request.method !== "POST") return json({ ok: false, error: "post_only" }, 405);
+        return json(await appendMessages(env, { ...body, user_id }));
+      }
+      case "delete": {
+        if (request.method !== "POST") return json({ ok: false, error: "post_only" }, 405);
+        return json(await deleteMemory(env, user_id, String(body.scope || ""), body.id));
+      }
+      case "digest": {
+        if (request.method !== "POST") return json({ ok: false, error: "post_only" }, 405);
+        return json(await digest(env, user_id, { force_conv: cleanId(body.conv_id) || "" }));
+      }
+      default:
+        return json({ ok: false, error: "not_found", try: ["stats", "timeline", "conversation", "topics", "topic", "search", "append", "delete", "digest"] }, 404);
+    }
+  } catch (e) {
+    return json({ ok: false, error: "memory_failed", message: String(e && e.message ? e.message : e).slice(0, 240) }, 500);
+  }
+}
+
+async function handleChat(request, env, ctx) {
   let body;
   try {
     body = await request.json();
@@ -217,11 +330,43 @@ async function handleChat(request, env) {
     ? await planTurn(env, { userText: message, history: bot.gen.history, mode: uiMode, timeHint: formatKoreanTime(timeCtx.now, timeCtx.tz) })
     : null;
   const web = plan ? await runPlanResearch(env, plan) : { block: "", sources: [], thoughts: [], research: null };
-  const extra = { planBlock: formatPlanBlock(plan), webBlock: web.block, uiMode };
+
+  // Long-term memory: recall before answering, persist after
+  const user_id = cleanUserId(body.user_id);
+  const conv_id = cleanId(body.conv_id);
+  const hasMemory = memoryEnabled(env) && Boolean(user_id && conv_id);
+  let mem = { block: "", items: [], used: { days: 0, hits: 0, topics: 0 } };
+  if (hasMemory && message.trim()) {
+    try {
+      mem = await recall(env, { user_id, conv_id, text: message, memory_query: plan?.memory_query || "", now: timeCtx.now, tz: timeCtx.tz });
+    } catch (e) {
+      mem.error = String(e && e.message ? e.message : e).slice(0, 120);
+    }
+  }
+  const extra = { planBlock: formatPlanBlock(plan), webBlock: web.block, memoryBlock: mem.block, uiMode };
 
   const reply = await bot.turn(message, env, timeCtx, extra);
+
+  if (hasMemory && (message.trim() || timeCtx.event)) {
+    const now = Date.now();
+    const msgs = [];
+    if (message.trim()) msgs.push({ role: "user", content: message, kind: "chat", ts: timeCtx.now || now - 1 });
+    msgs.push({ role: "assistant", content: reply, kind: timeCtx.event ? "event" : "chat", ts: now, meta: { event: timeCtx.event || undefined, sources: web.sources.length ? web.sources : undefined } });
+    bg(
+      ctx,
+      appendMessages(env, { user_id, conv_id, mode: uiMode, tz: timeCtx.tz, messages: msgs }).then(() => {
+        // every ~10 messages: refresh this conversation's summary in the background
+        if (bot.turnCount % 5 === 0) return digest(env, user_id, { maxConvs: 1, maxDays: 0, maxTopics: 0, force_conv: conv_id });
+      })
+    );
+  }
+  bot.turnCount = (bot.turnCount || 0) + 1;
+
   const thinking = [
     ...(plan ? plan.thoughts : []),
+    ...(mem.used.hits || mem.used.topics || mem.used.days
+      ? [`기억 참고: 최근 ${mem.used.days}일 요약 · 관련 대화 ${mem.used.hits}개 · 주제 ${mem.used.topics}개`]
+      : []),
     ...web.thoughts,
     ...(bot.gen.lastThinking ? [`(모델 내부 생각) ${summarizeRawThinking(bot.gen.lastThinking)}`] : []),
   ];
@@ -237,6 +382,7 @@ async function handleChat(request, env) {
     plan: plan ? { provider: plan.provider, model: plan.model, ms: plan.ms, needs_web: plan.needs_web, queries: plan.queries, error: plan.error } : null,
     sources: web.sources,
     web: Boolean(web.sources.length),
+    memory: hasMemory ? { used: mem.used, items: mem.items.slice(0, 6), error: mem.error } : null,
     time: { tz: timeCtx.tz, now: timeCtx.now, gap_ms: timeCtx.gapMs },
   });
 }
@@ -718,6 +864,7 @@ ${dirs}
 기억:
 ${memTxt}
 ${timeBlock ? "\n" + timeBlock : ""}
+${this.extra?.memoryBlock ? "\n" + this.extra.memoryBlock : ""}
 ${this.extra?.planBlock ? "\n" + this.extra.planBlock : ""}
 ${this.extra?.webBlock ? "\n" + this.extra.webBlock + "\n웹 참고가 있으면 사실은 거기서만 가져오고, 끝에 '출처 [n]' 식으로 번호를 붙여라. 집착 톤은 유지." : ""}
 

@@ -14,6 +14,7 @@
         <h1>채티</h1>
         <p class="sub" id="headerSub">개인 비서 · 일 시키면 알아서 처리</p>
       </div>
+      <button type="button" id="memoryOpen" class="live-btn memory-open" title="기억 (타임라인·주제·검색)">기억</button>
       <div class="mode-soft" role="group" aria-label="모드">
         <button type="button" id="modeSecretary" class="soft-btn" aria-pressed="true" title="비서 (기본)">비서</button>
         <button type="button" id="modeRp" class="soft-btn" aria-pressed="false" title="롤플레이">채티(RP)</button>
@@ -80,7 +81,28 @@
     </form>
     <p class="hint">API: <code id="apiLabel"></code> · 대화는 이 기기에 저장 · <button type="button" id="clearPersist" class="linkish">기록 지우기</button></p>
   </div>
+  <section id="memoryPanel" class="memory-panel" hidden aria-label="기억">
+    <header class="memory-head">
+      <strong>채티의 기억</strong>
+      <nav class="memory-tabs" role="tablist">
+        <button type="button" data-tab="timeline" aria-selected="true">타임라인</button>
+        <button type="button" data-tab="topics" aria-selected="false">주제</button>
+        <button type="button" data-tab="search" aria-selected="false">검색</button>
+      </nav>
+      <button type="button" id="memoryNew" class="live-btn" title="새 대화 시작 (기억은 유지)">새 대화</button>
+      <button type="button" id="memoryClose" class="live-btn" aria-label="닫기">✕</button>
+    </header>
+    <p id="memoryStatus" class="memory-status"></p>
+    <div id="memoryBody" class="memory-body"></div>
+    <footer class="memory-foot">
+      <span>기억 코드 <code id="memoryCode"></code></span>
+      <button type="button" id="memoryCopyCode" class="linkish">복사</button>
+      <button type="button" id="memoryChangeCode" class="linkish">다른 기기 코드 입력</button>
+      <button type="button" id="memoryDeleteAll" class="linkish danger">모든 기억 삭제</button>
+    </footer>
+  </section>
   <script src="app.js"></script>
+  <script src="memory.js"></script>
   <script src="live.js"></script>
 </body>
 </html>
