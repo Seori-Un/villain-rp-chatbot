@@ -15,39 +15,80 @@ export function startPullLoop({ workerUrl, apiKey, pool, log = console.log }) {
   let backoff = 1000;
   // watchdog: if the loop makes no progress for 3 min, exit so the supervisor restarts us
   let lastTick = Date.now();
+  const touch = () => {
+    lastTick = Date.now();
+  };
   setInterval(() => {
-    if (Date.now() - lastTick > 180000) { log("[pull] watchdog: loop stuck >180s — exiting for restart"); process.exit(1); }
+    if (Date.now() - lastTick > 180000) {
+      log("[pull] watchdog: loop stuck >180s — exiting for restart");
+      process.exit(1);
+    }
   }, 15000).unref();
 
   async function post(path, body) {
-    const res = await fetch(base + path, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(20000) });
+    const res = await fetch(base + path, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20000),
+    });
     if (!res.ok) throw new Error(`${path} → HTTP ${res.status}`);
     return res.json().catch(() => ({}));
+  }
+
+  /** fetch + body read with hard deadline; AbortSignal alone can hang on half-open CF long-polls */
+  async function pollNext(waitSec = 20) {
+    const ms = 35000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      const raced = await Promise.race([
+        (async () => {
+          const res = await fetch(
+            `${base}/runner/next?wait=${waitSec}&runner_id=${encodeURIComponent(runnerId)}`,
+            { headers, signal: controller.signal }
+          );
+          if (res.status === 401) return { status: 401, data: null };
+          if (!res.ok) throw new Error("next → HTTP " + res.status);
+          const data = await res.json().catch(() => ({}));
+          return { status: res.status, data };
+        })(),
+        new Promise((_, rej) => {
+          setTimeout(() => rej(new Error("poll_timeout")), ms);
+        }),
+      ]);
+      return raced;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async function loop() {
     log(`[pull] connecting to ${base} as ${runnerId} (no tunnel)`);
     try {
-      await post("/runner/heartbeat", { runner_id: runnerId, info: { node: process.version, headless: pool.headless, sessions: pool.size() } });
+      await post("/runner/heartbeat", {
+        runner_id: runnerId,
+        info: { node: process.version, headless: pool.headless, sessions: pool.size() },
+      });
       log("[pull] heartbeat ok — Worker can reach this runner now");
+      touch();
     } catch (e) {
       log(`[pull] first heartbeat failed: ${e.message} (will keep trying)`);
+      touch();
     }
     while (!stopped) {
+      touch();
       try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 35000);
-        const res = await fetch(`${base}/runner/next?wait=20&runner_id=${encodeURIComponent(runnerId)}`, { headers, signal: controller.signal });
-        if (res.status === 401) {
+        const { status, data } = await pollNext(20);
+        touch();
+        backoff = 1000;
+        if (status === 401) {
           log("[pull] 401 — BROWSER_API_KEY가 Worker 시크릿과 달라. 60초 후 재시도");
           await sleep(60000);
+          touch();
           continue;
         }
-        if (!res.ok) throw new Error("next → HTTP " + res.status);
-        const data = await res.json().catch(() => ({})).finally(() => clearTimeout(timer));
-        lastTick = Date.now();
-        backoff = 1000;
-        const job = data.job;
+        const job = data && data.job;
         if (!job) continue; // long-poll timed out, loop again
         const { id, ...payload } = job;
         const t0 = Date.now();
@@ -57,20 +98,35 @@ export function startPullLoop({ workerUrl, apiKey, pool, log = console.log }) {
           let jt;
           result = await Promise.race([
             pool.act(payload),
-            new Promise((_, rej) => { jt = setTimeout(() => rej(new Error(`job_timeout ${JOB_MS}ms`)), JOB_MS); }),
+            new Promise((_, rej) => {
+              jt = setTimeout(() => rej(new Error(`job_timeout ${JOB_MS}ms`)), JOB_MS);
+            }),
           ]).finally(() => clearTimeout(jt));
         } catch (e) {
-          result = { ok: false, error: "runner_error", message: String(e && e.message ? e.message : e).slice(0, 300) };
+          result = {
+            ok: false,
+            error: "runner_error",
+            message: String(e && e.message ? e.message : e).slice(0, 300),
+          };
         }
-        log(`[pull] ${payload.action} ${payload.url || payload.ref != null ? "#" + payload.ref : ""} → ${result.ok === false ? "FAIL " + (result.error || "") : "ok"} (${Date.now() - t0}ms)`);
+        touch();
+        log(
+          `[pull] ${payload.action} ${
+            payload.url || payload.ref != null ? "#" + payload.ref : ""
+          } → ${result.ok === false ? "FAIL " + (result.error || "") : "ok"} (${Date.now() - t0}ms)`
+        );
         try {
           await post("/runner/result", { id, result });
         } catch (e) {
           log(`[pull] result post failed: ${e.message}`);
         }
+        touch();
       } catch (e) {
-        log(`[pull] ${e.message} — retry in ${backoff}ms`);
+        const msg = e && e.message ? e.message : String(e);
+        log(`[pull] ${msg} — retry in ${backoff}ms`);
+        touch();
         await sleep(backoff);
+        touch();
         backoff = Math.min(30000, backoff * 2);
       }
     }
